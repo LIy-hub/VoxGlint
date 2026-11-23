@@ -1,0 +1,237 @@
+#include "/Engine/Public/Platform.ush"
+#include "/MinecraftUEViewer/Private/McWaterCommon.ush"
+
+float SimulationTime;
+float WindStrength;
+float2 WindDirection;
+float FoamDecay;
+float Rain;
+uint ResetHistory;
+int2 MipExtent;
+
+RWTexture2DArray<float4> OutSpectrum;
+Texture2DArray<float4> FFTInput;
+RWTexture2DArray<float4> FFTOutput;
+RWTexture2DArray<float> FoamHistory;
+RWTexture2DArray<float4> OutDisplacement;
+RWTexture2DArray<float4> OutDerivatives;
+RWTexture2DArray<float4> OutMoments;
+Texture2DArray<float4> InDisplacement;
+Texture2DArray<float4> InDerivatives;
+Texture2DArray<float4> InMoments;
+
+uint WaterHash(uint N)
+{
+    N ^= N >> 16;
+    N *= 0x7feb352du;
+    N ^= N >> 15;
+    N *= 0x846ca68bu;
+    return N ^ (N >> 16);
+}
+
+float WaterRandom(uint Seed)
+{
+    return (float(WaterHash(Seed) >> 8) + 0.5) * (1.0 / 16777216.0);
+}
+
+float2 Gaussian(uint Seed)
+{
+    float S, C;
+    sincos(2.0 * McWaterPi * WaterRandom(Seed + 0x9e3779b9u), S, C);
+    return float2(C, S) * sqrt(-2.0 * log(max(WaterRandom(Seed), 1e-7)));
+}
+
+float2 ComplexMultiply(float2 A, float2 B)
+{
+    return float2(A.x * B.x - A.y * B.y, A.x * B.y + A.y * B.x);
+}
+
+float TmaCorrection(float OmegaDepth)
+{
+    // Piecewise approximation to the finite-depth TMA transfer function.
+    if (OmegaDepth <= 1.0)
+        return 0.5 * OmegaDepth * OmegaDepth;
+    float X = max(0.0, 2.0 - OmegaDepth);
+    return 1.0 - 0.5 * X * X;
+}
+
+float CascadeBand(float K, uint Cascade, float DeltaK)
+{
+    float Meso = smoothstep(3.0, 5.0, K);
+    float Capillary = smoothstep(23.0, 37.0, K);
+    float Band = Cascade == 0 ? 1.0 - Meso : (Cascade == 1 ? Meso * (1.0 - Capillary) : Capillary);
+    return Band * (1.0 - smoothstep(0.66, 0.92, K / (DeltaK * (WATER_FFT_SIZE / 2))));
+}
+
+[numthreads(WATER_TILE_SIZE, WATER_TILE_SIZE, 1)]
+void SpectrumCS(uint3 Id : SV_DispatchThreadID)
+{
+    const uint Mask = WATER_FFT_SIZE - 1;
+    const int Half = WATER_FFT_SIZE / 2;
+    int2 Mode = (int2(Id.xy) + Half) & Mask;
+    Mode -= Half;
+    if (all(Mode == 0) || any(Mode == -Half))
+    {
+        OutSpectrum[Id] = 0.0;
+        return;
+    }
+
+    const float Gravity = 9.81;
+    const float SurfaceTensionOverDensity = 0.000074;
+    const float Depths[MC_WATER_CASCADES] = {3.2, 1.35, 0.45};
+    float Depth = Depths[Id.z];
+    float DeltaK = (2.0 * McWaterPi) / McWaterPeriod[Id.z];
+    float K = length(float2(Mode)) * DeltaK;
+    float2 Direction = float2(Mode) * (DeltaK / K);
+    float TanhKH = tanh(K * Depth);
+    float RestoringForce = Gravity * K + SurfaceTensionOverDensity * K * K * K;
+    float Omega = sqrt(RestoringForce * TanhKH);
+    float GroupSpeed = ((Gravity + 3.0 * SurfaceTensionOverDensity * K * K) * TanhKH
+        + RestoringForce * Depth * (1.0 - TanhKH * TanhKH)) / (2.0 * Omega);
+
+    // Local lake calibration of the JONSWAP peak frequency and energy scale.
+    float Peak = lerp(6.6, 2.9, WindStrength);
+    float Alpha = lerp(0.0018, 0.012, WindStrength);
+    float Width = Omega <= Peak ? 0.07 : 0.09;
+    float PeakDistance = (Omega - Peak) / (Width * Peak);
+    float PeakEnhancement = pow(3.3, exp(-0.5 * PeakDistance * PeakDistance));
+    float RatioSq = (Peak / Omega) * (Peak / Omega);
+    float OmegaSq = Omega * Omega;
+    float Spectrum = Alpha * Gravity * Gravity / (OmegaSq * OmegaSq * Omega)
+        * exp(-1.25 * RatioSq * RatioSq) * PeakEnhancement * TmaCorrection(Omega * sqrt(Depth / Gravity));
+    // Transform from frequency/angle to a discrete 2-D wavenumber spectrum.
+    float Energy = Spectrum * (GroupSpeed / K) * (DeltaK * DeltaK) * CascadeBand(K, Id.z, DeltaK);
+    // Reduce capillary amplitude at centimetre wavelengths where viscosity damps the spectrum.
+    Energy *= Id.z == 2 ? 0.42 * exp(-K * 0.0035) : 1.0;
+    float AlongWind = dot(Direction, WindDirection);
+    float Spread = Id.z == 2 ? 0.55 : 0.19;
+    float Forward = Spread + 4.0 * (1.0 - Spread) * max(0.0, AlongWind) * max(0.0, AlongWind);
+    float Reverse = Spread + 4.0 * (1.0 - Spread) * max(0.0, -AlongWind) * max(0.0, -AlongWind);
+    float Amplitude = sqrt(max(0.0, Energy / (8.0 * McWaterPi)));
+
+    uint BaseSeed = Id.z * (WATER_FFT_SIZE * WATER_FFT_SIZE) + 0x369dea0fu;
+    uint2 Mirrored = (WATER_FFT_SIZE - Id.xy) & Mask;
+    float2 H0 = Gaussian(BaseSeed + Id.y * WATER_FFT_SIZE + Id.x) * (Amplitude * sqrt(Forward));
+    float2 MirrorH0 = Gaussian(BaseSeed + Mirrored.y * WATER_FFT_SIZE + Mirrored.x)
+        * float2(1.0, -1.0) * (Amplitude * sqrt(Reverse));
+    float S, C;
+    sincos(Omega * SimulationTime, S, C);
+    float2 H = ComplexMultiply(H0, float2(C, -S)) + ComplexMultiply(MirrorH0, float2(C, S));
+    float Chop = lerp(0.55, 2.35, smoothstep(0.20, 1.0, WindStrength));
+    // Pack two Hermitian fields in one complex transform: real = height; imaginary = Dx.
+    // The second complex transform carries Dy in its real component.
+    OutSpectrum[Id] = float4(H * (1.0 - Direction.x * Chop), float2(-H.y, H.x) * (Direction.y * Chop));
+}
+
+groupshared float4 FFTLine[2][WATER_FFT_SIZE];
+
+uint3 FFTCoordinate(uint3 Group, uint Lane)
+{
+#if WATER_FFT_VERTICAL
+    return uint3(Group.x, Lane, Group.y);
+#else
+    return uint3(Lane, Group.x, Group.y);
+#endif
+}
+
+[numthreads(WATER_FFT_SIZE / 2, 1, 1)]
+void StockhamCS(uint3 Group : SV_GroupID, uint Lane : SV_GroupIndex)
+{
+    const uint Half = WATER_FFT_SIZE / 2;
+    uint3 Low = FFTCoordinate(Group, Lane);
+    uint3 High = FFTCoordinate(Group, Lane + Half);
+    FFTLine[0][Lane] = FFTInput.Load(int4(Low, 0));
+    FFTLine[0][Lane + Half] = FFTInput.Load(int4(High, 0));
+    GroupMemoryBarrierWithGroupSync();
+
+    uint Read = 0;
+    [unroll]
+    for (uint Span = 1; Span <= Half; Span <<= 1)
+    {
+        uint J = Lane & (Span - 1);
+        uint First = (Lane - J) * 2 + J;
+        float S, C;
+        sincos(McWaterPi * float(J) / float(Span), S, C);
+        float4 A = FFTLine[Read][Lane];
+        float4 B = FFTLine[Read][Lane + Half];
+        float4 T = float4(ComplexMultiply(B.xy, float2(C, S)), ComplexMultiply(B.zw, float2(C, S)));
+        FFTLine[Read ^ 1][First] = A + T;
+        FFTLine[Read ^ 1][First + Span] = A - T;
+        GroupMemoryBarrierWithGroupSync();
+        Read ^= 1;
+    }
+    // The discrete spectrum already represents Fourier series amplitudes in metres.
+    FFTOutput[Low] = FFTLine[Read][Lane];
+    FFTOutput[High] = FFTLine[Read][Lane + Half];
+}
+
+float3 SpatialField(int2 Pixel, uint Slice)
+{
+    return FFTInput.Load(int4(Pixel & (WATER_FFT_SIZE - 1), Slice, 0)).xyz;
+}
+
+float2 RainSlope(float2 Position)
+{
+    const int Cells = 16;
+    const float CellSize = McWaterPeriod[1] / float(Cells);
+    float2 P = Position / CellSize;
+    int2 Base = int2(floor(P - 0.5));
+    float2 Slope = 0.0;
+    [unroll]
+    for (uint I = 0; I < 4; ++I)
+    {
+        int2 Cell = Base + int2(I & 1, I >> 1);
+        uint Seed = uint(Cell.x & (Cells - 1)) + Cells * uint(Cell.y & (Cells - 1));
+        float2 Center = float2(Cell) + 0.24 + 0.52 * float2(WaterRandom(Seed + 4049), WaterRandom(Seed + 829));
+        float Age = frac(SimulationTime * lerp(2.6, 4.7, WaterRandom(Seed + 3947)) + WaterRandom(Seed + 173));
+        float2 Delta = (P - Center) * CellSize;
+        float Distance = length(Delta);
+        float Ring = (Distance - (0.012 + Age * 0.102)) * (1.0 / 0.015);
+        float Envelope = smoothstep(0.0, 0.10, Age) * (1.0 - Age) * (1.0 - smoothstep(0.060, 0.123, Distance));
+        Slope += Delta * (-0.31 * Envelope * Ring * exp(-0.5 * Ring * Ring) / max(0.002, Distance));
+    }
+    return Rain * Slope;
+}
+
+[numthreads(WATER_TILE_SIZE, WATER_TILE_SIZE, 1)]
+void ResolveWavesCS(uint3 Id : SV_DispatchThreadID)
+{
+    int2 Pixel = int2(Id.xy);
+    float MetersPerTexel = McWaterPeriod[Id.z] / WATER_FFT_SIZE;
+    float HalfInvStep = 0.5 / MetersPerTexel;
+    float3 Center = SpatialField(Pixel, Id.z);
+    float3 Dx = (SpatialField(Pixel + int2(1, 0), Id.z) - SpatialField(Pixel - int2(1, 0), Id.z)) * HalfInvStep;
+    float3 Dy = (SpatialField(Pixel + int2(0, 1), Id.z) - SpatialField(Pixel - int2(0, 1), Id.z)) * HalfInvStep;
+    float Jacobian = (1.0 + Dx.y) * (1.0 + Dy.z) - Dy.y * Dx.z;
+    float Fold = (1.0 - smoothstep(0.22, 0.68, Jacobian)) * smoothstep(0.52, 0.87, WindStrength);
+    float Previous = 0.0;
+    [branch] if (!ResetHistory)
+        Previous = FoamHistory[Id];
+    float Foam = max(Fold, Previous * FoamDecay);
+    FoamHistory[Id] = Foam;
+
+    float2 Slope = float2(Dx.x, Dy.x);
+    float2 RainDerivative = 0.0;
+    [branch] if (Id.z == 1 && Rain > 0.005)
+        RainDerivative = RainSlope((float2(Id.xy) + 0.5) * MetersPerTexel);
+    OutDisplacement[Id] = float4(Center.yz, Center.x, Foam);
+    OutDerivatives[Id] = float4(Slope, Dx.y, Dy.z);
+    OutMoments[Id] = float4(dot(Slope, Slope), RainDerivative, dot(RainDerivative, RainDerivative));
+}
+
+float4 Average4(Texture2DArray<float4> Input, int3 P)
+{
+    return 0.25 * (Input.Load(int4(P, 0)) + Input.Load(int4(P + int3(1, 0, 0), 0))
+        + Input.Load(int4(P + int3(0, 1, 0), 0)) + Input.Load(int4(P + int3(1, 1, 0), 0)));
+}
+
+[numthreads(WATER_TILE_SIZE, WATER_TILE_SIZE, 1)]
+void WaveMipCS(uint3 Id : SV_DispatchThreadID)
+{
+    if (any(Id.xy >= uint2(MipExtent)))
+        return;
+    int3 P = int3(Id.xy * 2, Id.z);
+    OutDisplacement[Id] = Average4(InDisplacement, P);
+    OutDerivatives[Id] = Average4(InDerivatives, P);
+    OutMoments[Id] = Average4(InMoments, P);
+}

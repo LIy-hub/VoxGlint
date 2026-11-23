@@ -1,0 +1,99 @@
+#ifndef MC_WATER_SUN
+#define MC_WATER_SUN
+
+#include "/MinecraftUEViewer/Private/McWaterOptics.ush"
+
+uint McWaterSunColumn(Texture2D Grid, float2 PositionM)
+{
+    int2 P = int2(floor(float2(-PositionM.y, PositionM.x)));
+    if (any(P < 0) || any(P >= 256))
+        return 0;
+    uint4 B = uint4(round(Grid.Load(int3(P, 0)) * 255.0));
+    return B.x | (B.y << 8) | (B.z << 16) | (B.w << 24);
+}
+
+bool McWaterSunLayer(uint C, float Z, out float Top)
+{
+    Top = (C & 2047u) + float((C >> 11) & 63u) / 64.0;
+    float Bottom = (C & (1u << 31)) != 0u ? -1e6 : ceil(Top) - float((C >> 17) & 31u);
+    return (C & (3u << 26)) == (3u << 26) && Z >= Bottom - 0.04 && Z < Top - 0.012;
+}
+
+float3 McWaterShadowPosition(float3 P, float3 Axis, float3 Center, float Radius)
+{
+    float3 X = normalize(cross(float3(0, 1, 0), Axis));
+    float3 Y = cross(Axis, X);
+    float3 D = P - Center;
+    return float3(dot(D, X) / Radius, dot(D, Y) / Radius, 0.5 + dot(D, Axis) / 260.0);
+}
+
+float McWaterSunVisibility(Texture2D Shadow, float3 P, float3 Axis, float3 Center, float Radius, float Bias)
+{
+    float3 S = McWaterShadowPosition(P, Axis, Center, Radius);
+    float2 UV = S.xy * float2(0.5, -0.5) + 0.5;
+    if (any(UV <= 0.0) || any(UV >= 1.0) || S.z <= 0.0 || S.z >= 1.0)
+        return 0.0;
+    uint W, H;
+    Shadow.GetDimensions(W, H);
+    float2 Texel = UV * float2(W, H) - 0.5;
+    int2 Base = int2(floor(Texel));
+    float4 Probe = float4(Shadow.Load(int3(Base, 0)).r,
+        Shadow.Load(int3(Base + int2(1, 0), 0)).r,
+        Shadow.Load(int3(Base + int2(0, 1), 0)).r,
+        Shadow.Load(int3(Base + int2(1, 1), 0)).r);
+    float4 Vis = step(Probe, S.z + Bias / 260.0);
+    float2 F = frac(Texel);
+    return lerp(lerp(Vis.x, Vis.y, F.x), lerp(Vis.z, Vis.w, F.x), F.y);
+}
+
+bool McWaterSunEntry(Texture2D Grid, float3 P, float3 TowardWater, out float3 Entry, out float Distance)
+{
+    uint C = McWaterSunColumn(Grid, P.xy);
+    float Top;
+    Entry = P;
+    Distance = 0.0;
+    if (!McWaterSunLayer(C, P.z, Top) || (C & (1u << 29)) != 0u)
+        return false;
+    [unroll] for (uint Refit = 0; Refit < 2; ++Refit)
+    {
+        Distance = (Top - P.z) / max(0.05, TowardWater.z);
+        Entry = P + TowardWater * Distance;
+        C = McWaterSunColumn(Grid, Entry.xy);
+        float OtherTop;
+        if (!McWaterSunLayer(C, Top - 0.08, OtherTop) || abs(OtherTop - Top) > 0.5)
+            return false;
+        Top = OtherTop;
+    }
+    Distance = (Top - P.z) / max(0.05, TowardWater.z);
+    Entry = P + TowardWater * Distance;
+    // Intermediate columns reject projections crossing a dry gap or another level.
+    float MidTop;
+    return Distance <= 48.0 && McWaterSunLayer(McWaterSunColumn(Grid, (P.xy + Entry.xy) * 0.5),
+        (P.z + Entry.z) * 0.5, MidTop) && abs(MidTop - Top) < 0.65;
+}
+
+float McWaterRippleFocus(Texture2DArray Pattern, SamplerState PatternSampler, float3 Entry, float PathM, float FootprintM)
+{
+    const float PeriodM = 9.0;
+    float Mip = clamp(log2(max(1.0, FootprintM * 256.0 / PeriodM)) + PathM * 0.065, 0.0, 8.0);
+    return Pattern.SampleLevel(PatternSampler, float3(Entry.xy / PeriodM, 0), Mip).r;
+}
+
+float McWaterCausticFactor(Texture2D Grid, Texture2D AirShadow, Texture2D WaterShadow, Texture2DArray Pattern,
+    SamplerState PatternSampler, float3 P, float3 Center, float3 SunAir, float3 SunWater, float Radius, float Strength, float2 PhaseM)
+{
+    if (Strength <= 0.0 || dot(P - Center, P - Center) > Radius * Radius)
+        return 1.0;
+    float Path;
+    float3 Entry;
+    if (!McWaterSunEntry(Grid, P + float3(0, 0, 0.035), SunWater, Entry, Path))
+        return 1.0;
+    float AirLit = McWaterSunVisibility(AirShadow, Entry + SunAir * 0.08, SunAir, Center, Radius, 0.10);
+    float WaterLit = McWaterSunVisibility(WaterShadow, P + SunWater * 0.16, SunWater, Center, Radius, 0.16);
+    float Footprint = max(length(ddx(Entry)), length(ddy(Entry)));
+    float Focus = McWaterRippleFocus(Pattern, PatternSampler, Entry + float3(PhaseM, 0), Path, Footprint);
+    float Depth = exp2(-0.20 * Path) * smoothstep(0.0, 0.20, Path);
+    return 1.0 - Strength * AirLit * WaterLit * Depth * (1.0 - saturate(Focus * 2.2));
+}
+
+#endif

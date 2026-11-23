@@ -1,0 +1,133 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="1600" height="960" viewBox="0 0 1600 960" role="img" aria-labelledby="title desc">
+  <title id="title">VoxGlint 标志标准制图</title>
+  <desc id="desc">在 128 单位的正方形画板上标出蓝绿 V 的等高台阶、等宽端头、折面和两条外斜边，并给出标准色、最小留白和小尺寸校样。</desc>
+  <defs>
+    <path id="outline" d="M14 38H42V53H54V68H60L64 51L91 24H119L64 112H54L19 56H14Z"/>
+    <path id="facet" d="M64 51L91 24L52 102Z"/>
+    <g id="mark">
+      <use xlink:href="#outline" fill="#077DF9"/>
+      <use xlink:href="#facet" fill="#3BE7BB"/>
+    </g>
+    <pattern id="grid-minor" width="4" height="4" patternUnits="userSpaceOnUse">
+      <path d="M0 4V0H4" fill="none" stroke="#DDE6EB" stroke-width=".18"/>
+    </pattern>
+    <pattern id="grid" width="16" height="16" patternUnits="userSpaceOnUse">
+      <rect width="16" height="16" fill="url(#grid-minor)"/>
+      <path d="M0 16V0H16" fill="none" stroke="#B8CAD4" stroke-width=".28"/>
+    </pattern>
+    <style>
+      text { font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif; fill: #152E41; }
+      .heading { font-size: 24px; font-weight: 600; }
+      .label { font-size: 19px; }
+      .secondary { fill: #486171; }
+      .mono { font-family: "IBM Plex Mono", Consolas, monospace; }
+      .dimension { fill: none; stroke: #38596D; stroke-width: .27; stroke-linecap: square; }
+      .extension { fill: none; stroke: #78909C; stroke-width: .21; stroke-dasharray: 1.1 .8; }
+      .dim-text { font-family: "IBM Plex Mono", Consolas, monospace; font-size: 3.45px; fill: #24495E; }
+      .axis-text { font-family: "IBM Plex Mono", Consolas, monospace; font-size: 2.85px; fill: #667F8D; }
+      .node { fill: #FFFFFF; stroke: #1D586E; stroke-width: .25; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="960" fill="#FBFCFC"/>
+  <g>
+    <text x="72" y="88" font-size="58" font-weight="650" letter-spacing="-2.4">VoxGlint</text>
+    <path d="M328 46V86" stroke="#B9C8CE"/>
+    <text x="357" y="82" font-size="31" font-weight="500">标志标准制图</text>
+    <text x="1528" y="78" text-anchor="end" class="label secondary">每个单位 u 等于画板边长的 1/128</text>
+    <path d="M72 122H1528M934 153V905" fill="none" stroke="#C9D5DA"/>
+    <text x="72" y="175" class="heading">几何构造</text>
+    <text x="897" y="174" text-anchor="end" class="mono secondary" font-size="17">128 × 128 u</text>
+  </g>
+
+  <g transform="translate(176 217) scale(4.5)">
+    <rect width="128" height="128" fill="#FFFFFF"/>
+    <rect width="128" height="128" fill="url(#grid)" stroke="#B7C7D0" stroke-width=".24"/>
+    <g class="axis-text" text-anchor="middle">
+      <text x="0" y="-2.2">0</text><text x="32" y="-2.2">32</text>
+      <text x="64" y="-2.2">64</text><text x="96" y="-2.2">96</text><text x="128" y="-2.2">128</text>
+    </g>
+    <g class="axis-text" text-anchor="end">
+      <text x="-2.2" y="1">0</text><text x="-2.2" y="33">32</text>
+      <text x="-2.2" y="65">64</text><text x="-2.2" y="97">96</text><text x="-2.2" y="129">128</text>
+    </g>
+
+    <use xlink:href="#outline" fill="#077DF9" fill-opacity=".17" stroke="#2367A1" stroke-width=".43" stroke-linejoin="round"/>
+    <use xlink:href="#facet" fill="#3BE7BB" fill-opacity=".77" stroke="#148976" stroke-width=".34" stroke-linejoin="round"/>
+    <g class="extension">
+      <path d="M14 38V28M42 38V28M91 24V14M119 24V14"/>
+      <path d="M4 38H14M4 53H42M4 68H54"/>
+      <path d="M64 112H96M52 102L47 123.25"/>
+    </g>
+    <g class="dimension">
+      <path d="M14 30H42M14 28.9V31.1M42 28.9V31.1"/>
+      <path d="M91 16H119M91 14.9V17.1M119 14.9V17.1"/>
+      <path d="M4.5 38V68M3.4 38H5.6M3.4 53H5.6M3.4 68H5.6"/>
+      <path d="M74 112A10 10 0 0 0 69.3 103.52"/>
+      <path d="M78 37L71.2 27H62"/>
+    </g>
+    <g class="dim-text">
+      <text x="28" y="27.8" text-anchor="middle">28 u</text>
+      <text x="105" y="13.8" text-anchor="middle">28 u</text>
+      <text x="2.3" y="46.8" text-anchor="end">15 u</text>
+      <text x="2.3" y="61.8" text-anchor="end">15 u</text>
+      <text x="60" y="28.2" text-anchor="end">45°</text>
+      <text x="76" y="108.8">≈58°</text>
+    </g>
+    <g class="node">
+      <circle cx="14" cy="38" r=".65"/><circle cx="42" cy="38" r=".65"/>
+      <circle cx="42" cy="53" r=".65"/><circle cx="54" cy="53" r=".65"/>
+      <circle cx="54" cy="68" r=".65"/><circle cx="60" cy="68" r=".65"/>
+      <circle cx="64" cy="51" r=".65"/><circle cx="91" cy="24" r=".65"/>
+      <circle cx="119" cy="24" r=".65"/><circle cx="64" cy="112" r=".65"/>
+      <circle cx="54" cy="112" r=".65"/><circle cx="19" cy="56" r=".65"/>
+      <circle cx="14" cy="56" r=".65"/><circle cx="52" cy="102" r=".65"/>
+    </g>
+  </g>
+
+  <path d="M72 825H897" stroke="#CFDADD"/>
+  <g class="label secondary">
+    <text x="72" y="858">外斜边 · 水平 / 垂直</text>
+    <text x="375" y="858">折面长边 · 水平 / 垂直</text>
+    <text x="721" y="858">底部截口</text>
+  </g>
+  <g class="mono" font-size="30">
+    <text x="72" y="901">5 / 8</text><text x="375" y="901">1 / 2</text><text x="721" y="901">10 u</text>
+  </g>
+
+  <text x="976" y="175" class="heading">标准图形与留白</text>
+  <rect x="976" y="206" width="552" height="326" rx="4" fill="#EEF5FA"/>
+  <g transform="translate(1067 185) scale(2.75)">
+    <rect x="6" y="16" width="121" height="104" fill="none" stroke="#849BA8" stroke-width=".35" stroke-dasharray="1.5 1.5"/>
+    <use xlink:href="#mark"/>
+    <path d="M103 16V24M101.8 16H104.2M101.8 24H104.2" fill="none" stroke="#466579" stroke-width=".35"/>
+    <text x="106" y="21.6" class="mono" font-size="4.5">8 u</text>
+  </g>
+  <text x="976" y="565" class="label secondary">从图形最外缘向四周各留 8 u 空间。</text>
+
+  <path d="M976 593H1528" stroke="#CFDADD"/>
+  <text x="976" y="633" class="heading">标准色</text>
+  <text x="1528" y="631" text-anchor="end" class="mono secondary" font-size="17">sRGB</text>
+  <rect x="976" y="657" width="264" height="46" rx="2" fill="#077DF9"/>
+  <rect x="1264" y="657" width="264" height="46" rx="2" fill="#3BE7BB"/>
+  <g class="label">
+    <text x="976" y="735">晴蓝</text><text x="1264" y="735">薄荷青</text>
+  </g>
+  <g class="mono secondary" font-size="19" text-anchor="end">
+    <text x="1240" y="735">#077DF9</text><text x="1528" y="735">#3BE7BB</text>
+  </g>
+
+  <path d="M976 775H1528" stroke="#CFDADD"/>
+  <text x="976" y="818" class="heading">小尺寸校样</text>
+  <g>
+    <use xlink:href="#mark" transform="translate(977 862) scale(.125)"/>
+    <use xlink:href="#mark" transform="translate(1098 858) scale(.1875)"/>
+    <use xlink:href="#mark" transform="translate(1226 854) scale(.25)"/>
+    <use xlink:href="#mark" transform="translate(1372 838) scale(.5)"/>
+  </g>
+  <g class="mono secondary" font-size="17">
+    <text x="1004" y="876">16 px</text><text x="1130" y="876">24 px</text>
+    <text x="1267" y="876">32 px</text><text x="1443" y="876">64 px</text>
+  </g>
+</svg>

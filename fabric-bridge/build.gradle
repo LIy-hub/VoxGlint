@@ -1,0 +1,143 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+version = mod_version
+group = 'dev.minecraftue'
+
+base {
+    archivesName = 'voxglint'
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${loader_version}"
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(25)
+}
+
+tasks.named('runClient', JavaExec) {
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+    if (providers.gradleProperty('singleWindow').isPresent()) {
+        systemProperty 'minecraftue.singleWindow', 'true'
+    }
+    if (providers.gradleProperty('externalRenderer').isPresent()) {
+        systemProperty 'minecraftue.renderer.autostart', 'false'
+    }
+    providers.gradleProperty('bridgeQuality').orNull?.with { quality ->
+        systemProperty 'minecraftue.quality', quality
+    }
+    providers.gradleProperty('bridgeHudMaxFps').orNull?.with { fps ->
+        systemProperty 'minecraftue.hudMaxFps', fps
+    }
+    if (providers.gradleProperty('gradientNormals').isPresent()) {
+        systemProperty 'minecraftue.gradientNormals', 'true'
+    }
+}
+
+sourceSets {
+    atlasContract {
+        compileClasspath += sourceSets.main.runtimeClasspath
+        runtimeClasspath += sourceSets.main.runtimeClasspath
+    }
+}
+
+tasks.register('verifyTerrainAtlas', JavaExec) {
+    group = 'verification'
+    description = 'Check the terrain atlas wire format and LabPBR resource handling without a game window.'
+    dependsOn tasks.named('atlasContractClasses')
+    classpath = sourceSets.atlasContract.runtimeClasspath
+    mainClass = 'dev.minecraftue.bridge.TerrainAtlasContract'
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+    systemProperty 'minecraftue.gradientNormals', providers.systemProperty('minecraftue.gradientNormals').getOrElse('true')
+    args temporaryDir.absolutePath
+}
+
+tasks.register('verifySectionLighting', JavaExec) {
+    group = 'verification'
+    description = 'Check section light exposure flags and the v23 light record.'
+    dependsOn tasks.named('atlasContractClasses')
+    classpath = sourceSets.atlasContract.runtimeClasspath
+    mainClass = 'dev.minecraftue.bridge.SectionLightingContract'
+    args temporaryDir.absolutePath
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+}
+
+tasks.register('verifyHudProgress', JavaExec) {
+    group = 'verification'
+    description = 'Check HUD fence stall detection across pauses in capture.'
+    dependsOn tasks.named('atlasContractClasses')
+    classpath = sourceSets.atlasContract.runtimeClasspath
+    mainClass = 'dev.minecraftue.bridge.HudProgressContract'
+}
+
+tasks.register('verifyTerrainSharedMemory', JavaExec) {
+    group = 'verification'
+    description = 'Check the Windows terrain mapping capacity, reservation and release contract.'
+    dependsOn tasks.named('atlasContractClasses')
+    classpath = sourceSets.atlasContract.runtimeClasspath
+    mainClass = 'dev.minecraftue.bridge.TerrainSharedMemoryContract'
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+    onlyIf { System.getProperty('os.name').startsWith('Windows') }
+}
+
+tasks.register('verifySettings', JavaExec) {
+    group = 'verification'
+    description = 'Check VoxGlint settings domains, persistence, Sodium detection, and C++ DetailSpecs parity.'
+    dependsOn tasks.named('atlasContractClasses')
+    classpath = sourceSets.atlasContract.runtimeClasspath
+    mainClass = 'dev.minecraftue.bridge.SettingsContract'
+    args temporaryDir.absolutePath
+}
+
+tasks.register('verifySectionGlass', JavaExec) {
+    group = 'verification'
+    description = 'Check resource-pack filters, Minecraft voxel thickness, and sparse section transport.'
+    dependsOn tasks.named('atlasContractClasses'), tasks.named('jar')
+    classpath = files(tasks.named('jar')) + sourceSets.atlasContract.runtimeClasspath
+    mainClass = 'dev.minecraftue.bridge.SectionGlassContract'
+    args temporaryDir.absolutePath
+}
+
+tasks.register('verifyWeatherTransport', JavaExec) {
+    group = 'verification'
+    description = 'Check precipitation types and cover with Minecraft 26.2 biomes and heightmaps.'
+    dependsOn tasks.named('atlasContractClasses')
+    classpath = sourceSets.atlasContract.runtimeClasspath
+    mainClass = 'dev.minecraftue.bridge.WeatherTransportContract'
+    args temporaryDir.absolutePath
+}
+
+tasks.register('verifyNativeWeatherWorld', JavaExec) {
+    group = 'verification'
+    description = 'Run a headless vanilla GameTest world and export a real lightning bridge frame.'
+    dependsOn tasks.named('atlasContractClasses')
+    classpath = sourceSets.atlasContract.runtimeClasspath
+    mainClass = 'dev.minecraftue.bridge.NativeWeatherWorldContract'
+    workingDir temporaryDir
+    args temporaryDir.absolutePath
+    jvmArgs '-Djava.awt.headless=true', '--enable-native-access=ALL-UNNAMED'
+    maxHeapSize = '2g'
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('verifySectionGlass'), tasks.named('verifyWeatherTransport')
+    dependsOn tasks.named('verifyTerrainAtlas'), tasks.named('verifySectionLighting'),
+            tasks.named('verifyHudProgress'), tasks.named('verifyTerrainSharedMemory'),
+            tasks.named('verifySettings')
+}
+
+tasks.named('jar') {
+    from(files('../LICENSE', '../NOTICE', '../THIRD_PARTY_NOTICES.md')) {
+        into('META-INF')
+    }
+}
+
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('fabric.mod.json') {
+        expand version: project.version
+    }
+}

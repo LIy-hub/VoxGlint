@@ -1,0 +1,18 @@
+{
+  "required": true,
+  "package": "dev.minecraftue.bridge.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "client": ["MinecraftMixin", "CameraMixin", "LevelChunkMixin", "ClientChunkCacheMixin",
+    "SectionCompilerMixin", "TerrainModelRendererMixin", "BufferBuilderAccessor",
+    "SpriteContentsAccessor", "KeyboardHandlerMixin", "InputConstantsMixin", "MouseHandlerMixin",
+    "GameRendererMixin", "HudMixin", "ContainerDragAccessor", "WindowMixin", "VideoSettingsScreenMixin", "ScreenMixin",
+    "TextureAtlasAccessor", "TextureAtlasSpriteAccessor", "TextureAtlasMixin",
+    "TerrainAtlasPreparationMixin", "TerrainAtlasPreparationResultMixin",
+    "GpuDeviceAccessor", "VulkanHudDeviceMixin",
+    "DebugEntryFpsMixin", "DebugEntryChunkRenderStatsMixin", "DebugScreenOverlayMixin",
+    "ClientPacketListenerMixin", "LocalPlayerMixin", "ItemInHandRendererMixin",
+    "DynamicFeatureRendererMixin", "DynamicRenderTypeAccessor", "DynamicRenderSetupAccessor",
+    "DynamicTextureBindingAccessor", "DynamicTextureMixin", "FontTextureMixin",
+    "ClientLevelAccessor", "LightningBoltAccessor"],
+  "injectors": { "defaultRequire": 1 }
+}

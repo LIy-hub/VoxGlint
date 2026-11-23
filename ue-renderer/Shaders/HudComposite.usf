@@ -1,0 +1,28 @@
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/ColorUtils.ush"
+#include "/Engine/Private/GammaCorrectionCommon.ush"
+
+Texture2D HudTexture;
+SamplerState HudSampler;
+uint HudOpaque;
+float OutputGamma;
+
+float4 Main(float2 UV : TEXCOORD0) : SV_Target0
+{
+    float4 Raw = HudTexture.Sample(HudSampler, UV);
+    if (!HudOpaque && Raw.a > 0 && Raw.a < 1)
+    {
+        // Match the existing byte-domain unpremultiplication before sRGB decoding.
+        Raw.rgb = floor(saturate(Raw.rgb / Raw.a) * 255.0 + 0.5) / 255.0;
+    }
+    Raw.rgb = sRGBToLinear(Raw.rgb);
+    if (OutputGamma != 1.0)
+    {
+        Raw.rgb = ApplyGammaCorrection(saturate(Raw.rgb), 2.2 * OutputGamma);
+    }
+    if (HudOpaque)
+    {
+        Raw.a = 1.0;
+    }
+    return RETURN_COLOR(Raw);
+}

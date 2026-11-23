@@ -1,0 +1,44 @@
+#ifndef MC_WATER_OPTICS
+#define MC_WATER_OPTICS
+
+static const float McWaterIor = 1.333;
+
+// Coefficients are inverse metres. Linear tint matches the terrain vertex colour.
+void McWaterOpticalPreset(float3 Tint, out float3 Absorption, out float3 Scattering, out float PhaseG)
+{
+    float Ratio = Tint.g / max(Tint.b, 0.01);
+    float Cold = 1.0 - smoothstep(0.155, 0.24, Ratio);
+    float Warm = smoothstep(0.52, 0.68, Ratio);
+    float Swamp = smoothstep(0.96, 1.26, Ratio);
+    Absorption = lerp(float3(0.37, 0.125, 0.068), float3(0.43, 0.147, 0.080), Cold);
+    Absorption = lerp(Absorption, float3(0.22, 0.048, 0.026), Warm);
+    Absorption = lerp(Absorption, float3(0.55, 0.380, 0.750), Swamp);
+    Scattering = lerp(float3(0.0029, 0.0093, 0.013), float3(0.0017, 0.0042, 0.0076), Cold);
+    Scattering = lerp(Scattering, float3(0.0030, 0.017, 0.0142), Warm);
+    Scattering = lerp(Scattering, float3(0.014, 0.023, 0.0054), Swamp);
+    PhaseG = lerp(0.48, 0.68, Warm) - 0.16 * Swamp;
+}
+
+void McWaterApplyOpticalScale(float2 Scale, inout float3 Absorption, inout float3 Scattering)
+{
+    Absorption *= Scale.x;
+    Scattering *= Scale.y;
+}
+
+float3 McWaterTransmittance(float3 ExtinctionPerMetre, float PathMetres)
+{
+    return exp(-ExtinctionPerMetre * max(PathMetres, 0));
+}
+
+float McWaterFresnel(float CosIncident, float Eta, out float CosTransmitted)
+{
+    float Cos2 = 1.0 - Eta * Eta * (1.0 - CosIncident * CosIncident);
+    CosTransmitted = sqrt(max(0.0, Cos2));
+    if (Cos2 <= 0.0)
+        return 1.0;
+    float Rs = (Eta * CosIncident - CosTransmitted) / max(1e-5, Eta * CosIncident + CosTransmitted);
+    float Rp = (CosIncident - Eta * CosTransmitted) / max(1e-5, CosIncident + Eta * CosTransmitted);
+    return 0.5 * (Rs * Rs + Rp * Rp);
+}
+
+#endif

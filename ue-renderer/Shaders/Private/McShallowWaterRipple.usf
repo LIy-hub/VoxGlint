@@ -1,0 +1,189 @@
+#include "/Engine/Public/Platform.ush"
+#include "/MinecraftUEViewer/Private/McWaterWavePatterns.ush"
+
+int2 OriginInGridUnits;
+int TexelUnits;
+int RippleSize;
+Texture2D<float4> RippleWaterGrid;
+Texture2D<float4> RippleWaterField;
+
+struct FRippleImpulse
+{
+    float2 Position;
+    float2 Heading;
+    float4 Shape;
+};
+
+StructuredBuffer<uint> TileOffsets;
+StructuredBuffer<uint> TileImpulseIndices;
+StructuredBuffer<FRippleImpulse> RippleImpulses;
+RWTexture2D<float2> OutForcing;
+
+int2 GridShift;
+float RippleStep;
+uint ResetRipple;
+uint ApplyForcing;
+Texture2D<float2> PreviousRipple;
+Texture2D<float2> RippleForcing;
+RWTexture2D<float2> OutRipple;
+
+float RippleFrameSeconds;
+Texture2D<float2> CurrentRipple;
+Texture2D<float4> PreviousSurface;
+RWTexture2D<float4> OutSurface;
+
+int2 RippleGridUnits(int2 Pixel)
+{
+    return OriginInGridUnits + Pixel * TexelUnits + TexelUnits / 2;
+}
+
+bool InsideRipple(int2 Pixel)
+{
+    return all(Pixel >= 0) && all(Pixel < RippleSize);
+}
+
+uint RippleColumn(int2 Block)
+{
+    if (any(Block < 0) || any(Block >= 256)) return 0;
+    uint4 Bytes = uint4(round(RippleWaterGrid.Load(int3(Block, 0)) * 255.0));
+    if ((Bytes.a & 12u) != 12u || RippleWaterField.Load(int3(Block, 0)).r == 0.0) return 0;
+    return Bytes.r | (Bytes.g << 8) | (Bytes.b << 16) | (Bytes.a << 24);
+}
+
+int RippleHeight64(uint Column)
+{
+    return int((Column & 2047u) * 64u + ((Column >> 11) & 63u));
+}
+
+float RippleNeighbor(Texture2D<float2> History, int2 Pixel, int2 Offset, int2 Units, int Height64, float Center, int2 Shift)
+{
+    int2 Adjacent = Pixel + Offset;
+    if (!InsideRipple(Adjacent)) return Center;
+    int2 Block = Units >> 5;
+    int2 NextBlock = (Units + Offset * TexelUnits) >> 5;
+    [branch] if (any(NextBlock != Block))
+    {
+        uint Neighbor = RippleColumn(NextBlock);
+        // Reflect across dry cells and between vertically disconnected pools. Equal ghost
+        // and interior heights give zero normal derivative at the block boundary.
+        if (Neighbor == 0 || abs(RippleHeight64(Neighbor) - Height64) > 35) return Center;
+    }
+    Adjacent += Shift;
+    return InsideRipple(Adjacent) ? History.Load(int3(Adjacent, 0)).x : 0.0;
+}
+
+float4 RippleHeights(Texture2D<float2> History, int2 Pixel, int2 Units, uint Column, float Center, int2 Shift)
+{
+    int Height64 = RippleHeight64(Column);
+    return float4(
+        RippleNeighbor(History, Pixel, int2(-1, 0), Units, Height64, Center, Shift),
+        RippleNeighbor(History, Pixel, int2(1, 0), Units, Height64, Center, Shift),
+        RippleNeighbor(History, Pixel, int2(0, -1), Units, Height64, Center, Shift),
+        RippleNeighbor(History, Pixel, int2(0, 1), Units, Height64, Center, Shift));
+}
+
+float2 RippleImpulse(FRippleImpulse I, float2 Position)
+{
+    float2 Delta = Position - I.Position;
+    if (any(abs(Delta) >= I.Shape.x)) return 0.0;
+    if (dot(I.Heading, I.Heading) > 0.5)
+    {
+        float Along = dot(Delta, I.Heading);
+        float Behind = -Along;
+        float Across = abs(dot(Delta, float2(-I.Heading.y, I.Heading.x)));
+        // Two pressure ridges at +/-19.47 degrees. The moving hull repeatedly lays down
+        // divergent waves and a narrower low-frequency pressure trough behind its transom.
+        float Wedge = Across - (0.27 + 0.35355 * max(0.0, Behind));
+        float Blade = Wedge / (0.13 + 0.036 * max(0.0, Behind));
+        float Arms = (1.0 - 2.0 * Blade * Blade) * exp(-Blade * Blade);
+        float Tail = smoothstep(0.0, 0.35, Behind) * (1.0 - smoothstep(I.Shape.x * 0.55, I.Shape.x, Behind));
+        float Stern = exp(-13.0 * Across * Across - 0.9 * (Behind - 0.64) * (Behind - 0.64)) * Tail;
+        float BowRadius2 = 9.0 * (Along - 0.56) * (Along - 0.56) + 4.6 * Across * Across;
+        float Bow = (1.0 - BowRadius2) * exp(-BowRadius2);
+        return float2(I.Shape.y * (0.74 * Bow + Tail * Arms),
+            I.Shape.z * max(Stern, 0.28 * Tail * max(0.0, Arms)));
+    }
+    float R = length(Delta) / I.Shape.x;
+    float Window = 1.0 - smoothstep(0.72, 1.0, R);
+    float Pressure = McWaterPressurePulse(R).x;
+    float Bubbles = 0.45 + 0.55 * exp(-14.0 * (R - 0.52) * (R - 0.52));
+    return float2(I.Shape.y * Pressure, I.Shape.z * Bubbles * Window);
+}
+
+[numthreads(WATER_TILE_SIZE, WATER_TILE_SIZE, 1)]
+void RippleForcesCS(uint3 Id : SV_DispatchThreadID, uint3 Group : SV_GroupID)
+{
+    const uint Tile = Group.y * (RippleSize / WATER_TILE_SIZE) + Group.x;
+    const uint Start = TileOffsets[Tile];
+    const uint End = TileOffsets[Tile + 1];
+    float2 Force = 0.0;
+    [branch] if (Start != End)
+    {
+        uint Column = RippleColumn(RippleGridUnits(int2(Id.xy)) >> 5);
+        if (Column != 0)
+        {
+            float Top = RippleHeight64(Column) / 64.0;
+            float2 P = (float2(Id.xy) + 0.5) * (TexelUnits / 32.0);
+            [loop] for (uint Slot = Start; Slot < End; ++Slot)
+            {
+                FRippleImpulse I = RippleImpulses[TileImpulseIndices[Slot]];
+                if (abs(I.Shape.w - Top) <= 0.50) Force += RippleImpulse(I, P);
+            }
+        }
+    }
+    OutForcing[Id.xy] = float2(clamp(Force.x, -7.5, 7.5), saturate(Force.y));
+}
+
+[numthreads(WATER_TILE_SIZE, WATER_TILE_SIZE, 1)]
+void RippleStepCS(uint3 Id : SV_DispatchThreadID)
+{
+    int2 Pixel = int2(Id.xy);
+    int2 Units = RippleGridUnits(Pixel);
+    uint Column = RippleColumn(Units >> 5);
+    float2 State = 0.0;
+    [branch] if (Column != 0)
+    {
+        float Laplacian = 0.0;
+        int2 Old = Pixel + GridShift;
+        [branch] if (!ResetRipple && InsideRipple(Old))
+        {
+            State = PreviousRipple.Load(int3(Old, 0));
+            Laplacian = dot(RippleHeights(PreviousRipple, Pixel, Units, Column, State.x, GridShift), 1.0) - 4.0 * State.x;
+        }
+        float SpeedSquared = clamp(9.81 * (float((Column >> 17) & 31u) - 0.40), 2.25, 16.0);
+        float InvDx = 32.0 / TexelUnits;
+        float2 Edge = min(float2(Pixel) + 0.5, RippleSize - (float2(Pixel) + 0.5)) / InvDx;
+        float Absorber = 1.0 - smoothstep(0.0, 2.0, min(Edge.x, Edge.y));
+        float Damping = 0.50 + 7.5 * Absorber + ((Column & (1u << 29)) ? 2.35 : 0.0);
+        float Velocity = State.y + (SpeedSquared * InvDx * InvDx * RippleStep) * Laplacian;
+        [branch] if (ApplyForcing) Velocity += RippleForcing.Load(int3(Pixel, 0)).x;
+        State.y = clamp(Velocity * exp(-Damping * RippleStep), -8.5, 8.5);
+        State.x = clamp((State.x + State.y * RippleStep) * exp(-(0.07 + 3.0 * Absorber) * RippleStep), -0.42, 0.42);
+    }
+    OutRipple[Id.xy] = State;
+}
+
+[numthreads(WATER_TILE_SIZE, WATER_TILE_SIZE, 1)]
+void RippleResolveCS(uint3 Id : SV_DispatchThreadID)
+{
+    int2 Pixel = int2(Id.xy);
+    int2 Units = RippleGridUnits(Pixel);
+    uint Column = RippleColumn(Units >> 5);
+    float4 Result = 0.0;
+    [branch] if (Column != 0)
+    {
+        float2 State = CurrentRipple.Load(int3(Pixel, 0));
+        // The wave state is already scrolled. Foam still lives in the previous domain.
+        float4 H = RippleHeights(CurrentRipple, Pixel, Units, Column, State.x, int2(0, 0));
+        float InvDx = 32.0 / TexelUnits;
+        float2 Slope = float2(H.w - H.z, H.x - H.y) * (0.72 * InvDx); // UE X/Y
+        float Curvature = max(0.0, 4.0 * State.x - dot(H, 1.0)) * InvDx * InvDx;
+        float Energy = smoothstep(0.38, 1.35, abs(State.y)) * smoothstep(0.25, 1.65, Curvature);
+        float Foam = RippleForcing.Load(int3(Pixel, 0)).y + Energy * min(1.0, 4.2 * RippleFrameSeconds);
+        int2 Old = Pixel + GridShift;
+        [branch] if (!ResetRipple && InsideRipple(Old))
+            Foam += PreviousSurface.Load(int3(Old, 0)).z * exp(-0.88 * RippleFrameSeconds);
+        Result = float4(clamp(Slope, -2.0, 2.0), saturate(Foam), State.x);
+    }
+    OutSurface[Id.xy] = Result;
+}

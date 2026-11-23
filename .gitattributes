@@ -1,0 +1,10 @@
+* text=auto
+
+/fabric-bridge/gradlew text eol=lf
+*.bat text eol=crlf
+
+*.ico binary
+*.jar binary
+*.jpg binary
+*.png binary
+*.uasset binary

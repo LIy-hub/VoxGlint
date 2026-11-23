@@ -1,0 +1,19 @@
+#ifndef MC_WATER_COMMON
+#define MC_WATER_COMMON
+
+#define MC_WATER_CASCADES 3
+static const float McWaterPeriod[MC_WATER_CASCADES] = {24.0, 4.5, 0.75}; // metres
+static const float McWaterPi = 3.14159265359;
+static const float McWaterEta = 1.0 / 1.333;
+
+float2 McWaterDisplacedSlope(float4 Derivatives)
+{
+    return Derivatives.xy / max(0.55, 1.0 + Derivatives.zw);
+}
+
+float3 McWaterRefractSun(float3 SunDirection, float2 Slope)
+{
+    return refract(-SunDirection, normalize(float3(-Slope, 1.0)), McWaterEta);
+}
+
+#endif

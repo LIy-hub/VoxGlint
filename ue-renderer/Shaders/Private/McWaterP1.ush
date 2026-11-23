@@ -1,0 +1,369 @@
+#ifndef MC_WATER_P1
+#define MC_WATER_P1
+
+#include "/MinecraftUEViewer/Private/McWaterMaterial.ush"
+#include "/MinecraftUEViewer/Private/McWaterWavePatterns.ush"
+
+float3 McWaterRelativeCoordinates(FDFVector3 World, float3 Origin)
+{
+    FDFVector3 MC;
+    MC.High = float3(-World.High.y, World.High.x, World.High.z);
+    MC.Low = float3(-World.Low.y, World.Low.x, World.Low.z);
+    return DFSubtractDemote(MC, DFTwoProduct(Origin, float3(100.0, 100.0, 100.0))) * 0.01;
+}
+
+uint McWaterColumn(Texture2D Grid, int2 Index)
+{
+    if (any(Index < 0) || any(Index >= 256)) return 0u;
+    uint4 B = (uint4)round(Grid.Load(int3(Index, 0)) * 255.0);
+    return B.x | (B.y << 8) | (B.z << 16) | (B.w << 24);
+}
+
+float McWaterColumnTop(uint Cell)
+{
+    return (Cell & 2047u) + (((Cell >> 11) & 63u) / 64.0);
+}
+
+#if PIXELSHADER
+
+float3 McWaterRelativeMC(FMaterialPixelParameters P, float3 Origin)
+{
+    return McWaterRelativeCoordinates(WSToDF(GetWorldPosition_NoMaterialOffsets(P)), Origin);
+}
+
+float4 McWaterSite(FMaterialPixelParameters P, Texture2D Grid, Texture2D Field, float3 Origin,
+    float GridReady, float P1, float Role)
+{
+    if (P1 < 0.5 || GridReady < 0.5 || Role > 0.5) return float4(-1, 0, 0, 0);
+    float3 Local = McWaterRelativeMC(P, Origin);
+    int2 Index = int2(floor(Local.xy));
+    uint Cell = McWaterColumn(Grid, Index);
+    if ((Cell & (3u << 26)) != (3u << 26)) return float4(-1, 0, 0, 0);
+    float Height = McWaterColumnTop(Cell);
+    if (abs(Local.z - Height) > 0.54) return float4(-1, 0, 0, 0);
+    float4 Limits = Field.Load(int3(Index, 0)) * 255.0;
+    float Edge = min(min(Local.x, 256.0 - Local.x), min(Local.y, 256.0 - Local.y));
+    float Valid = smoothstep(0.0, 6.0, Edge);
+    float Sky = (Cell & (1u << 28)) != 0 ? Valid : -Valid;
+    return float4(lerp(1.0, Limits.x / 16.0, Valid), Limits.y / 8.0 * Valid,
+        (Cell >> 17) & 31, Sky);
+}
+
+float3 McWaterP1Waves(float4 Site, float P1, float2 Mode)
+{
+    if (P1 < 0.5) return 1.0;
+    if (Mode.x > 0.5) return 0.0;
+    if (Site.x < 0.0) return float3(0.0, 0.13, 0.45);
+    float Open = saturate(Site.w);
+    float Width = smoothstep(0.4, 6.0, Site.x);
+    float Fetch = smoothstep(1.0, 19.0, Site.y);
+    float Depth = smoothstep(1.0, 4.0, Site.z);
+    float Long = saturate(Width * Fetch * Open * Depth);
+    float Middle = lerp(0.12, 1.0, saturate((0.46 * Width + 0.54 * Fetch) * Open)) * lerp(0.68, 1.0, Depth);
+    float Fine = lerp(0.43, 1.0, max(Open * saturate(Fetch * 1.6), Width * 0.55));
+    if (Mode.y > 1.5) return float3(0.0, 0.12, Fine * 0.8);
+    return float3(Long, Middle, Fine);
+}
+
+float McWaterP1Rain(FMaterialPixelParameters P, Texture2D Grid, float3 Origin, float GridValid,
+    float GlobalRain, float4 Site, float Role)
+{
+    if (GlobalRain < 0.005 || Site.w <= 0.0 || Role > 0.5 || GridValid < 0.5) return 0.0;
+    float2 CellXY = floor(McWaterRelativeMC(P, float3(Origin.xy, 0)).xy);
+    if (any(CellXY < 0) || any(CellXY >= Origin.z)) return 0.0;
+    float4 Cell = Grid.Load(int3(int2(CellXY), 0));
+    return Cell.b > 0.5 && abs(Cell.g - 0.5) < 0.15 ? Site.w : 0.0;
+}
+
+float2 McWaterFlowUV(FDFVector3 World, float2 Velocity, float Time, float PhaseOffset)
+{
+    const float Period = 2.70;
+    return McWaterUV(World, Period, -Velocity * (frac(Time + PhaseOffset) - 0.5) * 100.0 +
+        float2(0.19, 0.14) * (Period * 100.0) * PhaseOffset);
+}
+
+float3 McWaterP1Motion(FMaterialPixelParameters P, float2 Flow, float2 Strength, float2 Drop,
+    float2 Mode, float Clock, float P1)
+{
+    if (P1 < 0.5 || Mode.x > 1.5 || Mode.y < 0.5) return 0.0;
+    FDFVector3 World = WSToDF(GetWorldPosition_NoMaterialOffsets(P));
+    float3 Position = GetTranslatedWorldPosition_NoMaterialOffsets(P);
+    float Footprint = max(length(ddx(Position)), length(ddy(Position))) * 0.01;
+    float Fade = 1.0 - smoothstep(0.025, 0.18, Footprint);
+    if (Mode.x < 0.5 && Mode.y < 1.5)
+    {
+        float2 PhaseUV = McWaterUV(World, 8.0, 0);
+        float Phase = Clock * 0.64 + sin(PhaseUV.x * 6.2831853) * cos(PhaseUV.y * 12.566371) * 0.135;
+        float2 Velocity = Flow * lerp(0.12, 0.85, Strength.x);
+        float Weight = abs(frac(Phase) * 2.0 - 1.0);
+        float2 A = McWaterFlowPattern(McWaterFlowUV(World, Velocity, Phase, 0.0), true);
+        float2 B = McWaterFlowPattern(McWaterFlowUV(World, Velocity, Phase, 0.5), true);
+        return float3(lerp(B, A, 1.0 - Weight) * (0.038 + 0.095 * Strength.x) * Fade, 0);
+    }
+    if (Mode.x > 0.5)
+    {
+        float3 N = normalize(P.TangentToWorld[2]);
+        float3 Down = normalize(float3(0, 0, -1) + N * N.z);
+        float3 Side = normalize(cross(N, Down));
+        float Cross = dot(Side.xy, McWaterUV(World, 24.0, 0)) * 24.0;
+        float Height = (fmod(World.High.z, 2400.0) + World.Low.z) * 0.01;
+        float Phase = (Height + Clock * 1.6) * 3.14159265;
+        float Bend = sin(Phase + Cross * 3.14159265);
+        float Stripe = sin(Cross * 20.943951 + 1.2 * Bend) + 0.46 * sin(Cross * 47.123890 - Bend);
+        float Curtain = cos(Phase * 2.0 + Cross * 6.2831853 + Bend);
+        float Age = Mode.y > 1.5 ? Strength.x + 1.0 - frac(Height) : 0.0;
+        return (Side * Stripe * 0.063 + Down * Curtain * 0.034) * Fade * lerp(0.48, 1.0, smoothstep(0.0, 6.0, Age));
+    }
+    return 0.0;
+}
+
+float McWaterP1Contact(FMaterialPixelParameters P, float4 Edges)
+{
+    float2 UV = frac(McWaterRelativeMC(P, 0).xy);
+    float4 D = float4(UV.x, 1.0 - UV.x, UV.y, 1.0 - UV.y);
+    float4 Mask = Edges * (1.0 - smoothstep(0.015, 0.23, D));
+    return max(max(Mask.x, Mask.y), max(Mask.z, Mask.w));
+}
+
+// A ray may cross both arms of a concave jet, or leave the curtain and enter its pool.
+// Add the wet parts of each interval. Stopping at the first exit draws a seam at the inner corner.
+float McWaterP1WetPath(float3 Start, float3 Ray, float ScenePath, Texture2D Grid, float GridReady, float Fallback)
+{
+    if (GridReady < 0.5) return Fallback;
+    int2 Cell = int2(floor(Start.xy + Ray.xy * 0.004));
+    int2 Step = int2(Ray.x < 0.0 ? -1 : 1, Ray.y < 0.0 ? -1 : 1);
+    float2 Stride = rcp(max(abs(Ray.xy), 1e-6));
+    float2 Next = (float2(Cell) + max(Step, 0) - Start.xy) * float2(Step) * Stride;
+    Next = select(abs(Ray.xy) > 1e-6, max(Next, 0.0), 1e8);
+    float Entry = 0.0, Wet = 0.0;
+    bool EndsInWater = false;
+    [loop] for (int I = 0; I < 12; ++I)
+    {
+        uint Column = McWaterColumn(Grid, Cell);
+        if ((Column & (1u << 26)) == 0u)
+            return I == 0 ? Fallback : (EndsInWater ? max(Wet, Fallback) : Wet);
+        float Boundary = min(Next.x, Next.y);
+        float End = min(Boundary, ScenePath);
+        EndsInWater = false;
+        if ((Column & (1u << 27)) != 0u)
+        {
+            float Top = McWaterColumnTop(Column);
+            float Bottom = (Column & (1u << 31)) != 0u ? -1e6 : ceil(Top) - float((Column >> 17) & 31u);
+            if (I == 0)
+            {
+                // Only the highest water layer is present in this grid. A lower cave needs its local record.
+                if (Start.z < Bottom - 0.02 || Start.z > Top + 0.55) return Fallback;
+                Top = max(Top, Start.z);
+            }
+            float BeginWet = Entry, EndWet = End;
+            if (abs(Ray.z) > 1e-5)
+            {
+                float2 CrossZ = (float2(Bottom, Top) - Start.z) / Ray.z;
+                BeginWet = max(Entry, min(CrossZ.x, CrossZ.y));
+                EndWet = min(End, max(CrossZ.x, CrossZ.y));
+            }
+            else if (Start.z < Bottom || Start.z > Top)
+                EndWet = Entry;
+            Wet += max(0.0, EndWet - BeginWet);
+            EndsInWater = EndWet >= End && BeginWet < End;
+        }
+        else if (I == 0) return Fallback;
+        if (End >= ScenePath) return Wet;
+        bool2 Crossed = Next <= Boundary + 1e-5;
+        Cell += select(Crossed, Step, int2(0, 0));
+        Next += select(Crossed, Stride, 0.0);
+        Entry = Boundary;
+    }
+    return Wet;
+}
+
+float2 McWaterShoreDepth(Texture2D Grid, float2 Position, float SurfaceZ, float Top, float Fallback)
+{
+    const float2 At = Position - 0.5;
+    const int2 Base = int2(floor(At));
+    const float2 F = frac(At);
+    float2 DepthAndCoverage = 0.0;
+    [unroll] for (int Y = 0; Y < 2; ++Y)
+    {
+        [unroll] for (int X = 0; X < 2; ++X)
+        {
+            const uint Other = McWaterColumn(Grid, Base + int2(X, Y));
+            const float OtherTop = McWaterColumnTop(Other);
+            const float Weight = (X == 0 ? 1.0 - F.x : F.x) * (Y == 0 ? 1.0 - F.y : F.y);
+            float2 Sample = float2(Fallback, 1.0);
+            if ((Other & (3u << 26)) == (3u << 26) && abs(OtherTop - Top) < 0.26)
+                Sample.x = max(0.0, SurfaceZ - ceil(OtherTop) + float((Other >> 17) & 31u));
+            else if ((Other & (3u << 26)) == (1u << 26))
+                Sample = 0.0;
+            DepthAndCoverage += Weight * Sample;
+        }
+    }
+    return DepthAndCoverage;
+}
+
+float McWaterShoreDensity(FMaterialPixelParameters P, Texture2D Grid, float3 Surface, float SceneDepth,
+    float SurfaceDepth, float Refraction)
+{
+    const float3 Sample = McWaterBackgroundSample(P, SceneDepth, SurfaceDepth, Refraction);
+    if (Sample.z <= SurfaceDepth)
+        return 1.0;
+    const float3 Offset = (McWaterPositionAtDepth(Sample.xy, ConvertToDeviceZ(Sample.z)) -
+        GetTranslatedWorldPosition_NoMaterialOffsets(P)) * 0.01;
+    const float BedDepth = -Offset.z;
+    if (BedDepth <= 0.04 || BedDepth >= 6.0)
+        return 1.0;
+    const float3 Bed = Surface + float3(-Offset.y, Offset.x, Offset.z);
+    const uint Cell = McWaterColumn(Grid, int2(floor(Bed.xy)));
+    const float Top = McWaterColumnTop(Cell);
+    const float Floor = ceil(Top) - float((Cell >> 17) & 31u);
+    // The screen hit must be a bed or riser of this water layer. Leave props,
+    // other water layers, and missing chunk data to the original scene depth.
+    if ((Cell & (3u << 26)) != (3u << 26) || abs(Top - Surface.z) > 0.26 || abs(Floor - Bed.z) > 1.03)
+        return 1.0;
+
+    const float2 Entry = McWaterShoreDepth(Grid, Surface.xy, Surface.z, Top, BedDepth);
+    const float SmoothBedDepth = McWaterShoreDepth(Grid, Bed.xy, Surface.z, Top, BedDepth).x;
+    // At a grazing angle the visible hit can jump over a riser in one pixel.
+    // Let the continuous depth at the entry carry more of the colour there.
+    const float EntryWeight = 0.72 * (1.0 - smoothstep(0.42, 0.88, P.CameraVector.z));
+    const float SmoothedDepth = lerp(SmoothBedDepth, Entry.x, EntryWeight);
+    const float Contact = smoothstep(0.5, 0.98, Entry.y);
+    const float Strength = 0.90 * smoothstep(0.05, 0.25, BedDepth) * (1.0 - smoothstep(3.0, 6.0, BedDepth));
+    return lerp(1.0, clamp(SmoothedDepth / BedDepth, 0.50, 1.48) * Contact, Strength);
+}
+
+float McWaterP1Density(FMaterialPixelParameters P, Texture2D Grid, Texture2D Field, float3 Origin, float GridReady,
+    float SceneDepth, float SurfaceDepth, float Refraction, float2 Mode, float Drop, float4 Site,
+    float P1, float EyeInWater)
+{
+    if (P1 < 0.5 || EyeInWater > 0.5 || Mode.x > 1.5) return 1.0;
+    float3 Start = McWaterRelativeMC(P, Origin);
+    float3 Ray = float3(P.CameraVector.y, -P.CameraVector.x, -P.CameraVector.z);
+    // Earlier face records only mark the falling body. Recognise a raised lip in the column field.
+    if (Mode.x < 0.5 && Mode.y < 1.5 && Drop < 0.5)
+    {
+        if (Site.x < 0.0) return 1.0;
+        const bool RaisedLip = Site.z >= 1.5 && Site.x <= 2.0 &&
+            Field.Load(int3(int2(floor(Start.xy)), 0)).a >= 0.5;
+        if (!RaisedLip)
+        {
+            return Mode.y < 0.5 && Site.z <= 6.0 && P.TangentToWorld[2].z > 0.8
+                ? McWaterShoreDensity(P, Grid, Start, SceneDepth, SurfaceDepth, Refraction) : 1.0;
+        }
+    }
+    // PNO leaves a flat interface undistorted. Trace its animated slope deviation inside water
+    // so highlights, background distortion and the path through the curtain move together.
+    float3 Incident = -P.CameraVector;
+    float3 FlatNormal = normalize(P.TangentToWorld[2]);
+    float3 RippleNormal = normalize(P.WorldNormal);
+    float3 Bend = refract(Incident, RippleNormal, 1.0 / 1.333) - refract(Incident, FlatNormal, 1.0 / 1.333);
+    float3 Interior = normalize(Incident + Bend * smoothstep(0.015, 0.16, -dot(Incident, FlatNormal)));
+    float3 TraceRay = float3(-Interior.y, Interior.x, Interior.z);
+    // Beyond the grid, a known fall/lip still has a local cross section about one block wide.
+    float Fallback = (Drop > 0.0 || Mode.y > 1.5)
+        ? min(rcp(max(1e-5, max(abs(Ray.x), abs(Ray.y)))), (1.0 + Drop) / max(1e-5, abs(Ray.z))) : -1.0;
+    float3 Sample = McWaterBackgroundSample(P, SceneDepth, SurfaceDepth, Refraction);
+    float ViewGap = max(0.0, Sample.z - SurfaceDepth);
+    float ViewCos = max(0.001, dot(-P.CameraVector, ResolvedView.ViewForward));
+    float Path = McWaterP1WetPath(Start, TraceRay, ViewGap / (100.0 * ViewCos), Grid, GridReady, Fallback) * 100.0;
+    if (Path < 0.0 || ViewGap < 0.01) return 1.0;
+    // SLW also darkens the background by its vertical distance below the entry surface.
+    // Remove the part of that lighting path in air when our ray has exited the water.
+    float AirBelow = max(0.0, -Ray.z) * max(0.0, ViewGap / ViewCos - Path);
+    return saturate(Path / max(0.01, ViewGap + AirBelow));
+}
+
+float McWaterP1Air(FMaterialPixelParameters P, float2 Strength, float2 Drop, float2 Mode)
+{
+    if (Mode.x > 1.5) return 0.0;
+    if (Mode.x < 0.5) return saturate(Drop.y + (Mode.y < 1.5 ? Strength.y : 0.0));
+    if (Mode.y < 1.5) return 0.0;
+    float Vertical = frac(McWaterRelativeMC(P, 0).z);
+    float Age = Strength.x + (1.0 - Vertical);
+    float Toe = Strength.y + Vertical;
+    float Aeration = smoothstep(0.30, 8.0, Age) * 0.45;
+    float Broken = smoothstep(1.0, 8.0, Drop.x) * (1.0 - smoothstep(0.08, 1.6, Toe)) * 0.55;
+    return saturate(Aeration + Broken);
+}
+
+float McWaterP1Foam(FMaterialPixelParameters P, Texture2D Lace, Texture2D Micro, float2 Flow,
+    float2 Strength, float2 Drop, float2 Mode, float4 Edges, float3 Waves, float2 Crest, float Clock)
+{
+    if (Mode.x > 1.5 || (Mode.x > 0.5 && Mode.y < 1.5)) return 0.0;
+    float Air = McWaterP1Air(P, Strength, Drop, Mode);
+    float Shore = Mode.x < 0.5 ? McWaterP1Contact(P, Edges) * (0.08 + 0.85 * Waves.y) : 0.0;
+    // Bubbles in the volume scatter light; surface foam collects where the jet breaks up at impact.
+    if (Mode.x > 0.5)
+    {
+        float Toe = Strength.y + frac(McWaterRelativeMC(P, 0).z);
+        Air *= lerp(0.10, 0.82, 1.0 - smoothstep(0.12, 1.5, Toe));
+    }
+    float Source = max(Air, max(Shore, Crest.x * 0.95));
+    if (Source < 0.002) return 0.0;
+    FDFVector3 World = WSToDF(GetWorldPosition_NoMaterialOffsets(P));
+    float3 Pos = GetTranslatedWorldPosition_NoMaterialOffsets(P);
+    float2 Dx = ddx(Pos.xy) * 0.01;
+    float2 Dy = ddy(Pos.xy) * 0.01;
+    float Footprint = max(length(ddx(Pos)), length(ddy(Pos))) * 0.01;
+    float Pattern;
+    if (Mode.x > 0.5)
+    {
+        float3 Down = float3(0, 0, -1);
+        float3 Across = normalize(cross(P.TangentToWorld[2], Down));
+        float2 Plane = float2(dot(Across.xy, McWaterUV(World, 6.0, 0)),
+            frac((fmod(World.High.z, 600.0) + World.Low.z) / 600.0 + Clock * 0.27));
+        float Film = Lace.SampleLevel(GlobalTrilinearWrappedSampler, Plane * float2(6, 2),
+            log2(max(1.0, Footprint * 128.0))).r;
+        float Bubbles = Micro.SampleLevel(GlobalTrilinearWrappedSampler, Plane * float2(8, 5),
+            log2(max(1.0, Footprint * 170.67))).r;
+        Pattern = 0.48 * Film + 0.52 * Bubbles;
+    }
+    else
+    {
+        float2 NoiseUV = McWaterUV(World, 0.86, 0);
+        float Pores = Micro.SampleGrad(GlobalTrilinearWrappedSampler, NoiseUV, Dx / 0.86, Dy / 0.86).r;
+        float Phase = Clock * 0.64 + (Pores - 0.5) * 0.16;
+        float2 Velocity = Flow * lerp(0.15, 1.0, min(1.0, Strength.x));
+        float A = Lace.SampleGrad(GlobalTrilinearWrappedSampler, McWaterFlowUV(World, Velocity, Phase, 0.0), Dx / 2.70, Dy / 2.70).r;
+        float B = Lace.SampleGrad(GlobalTrilinearWrappedSampler, McWaterFlowUV(World, Velocity, Phase, 0.5), Dx / 2.70, Dy / 2.70).r;
+        Pattern = 0.65 * lerp(B, A, 1.0 - abs(frac(Phase) * 2.0 - 1.0)) + 0.35 * Pores;
+    }
+    return Source * smoothstep(0.55 - 0.23 * Source, 0.75 - 0.24 * Source, Pattern)
+        * lerp(1.0, 0.32, smoothstep(0.10, 0.65, Footprint));
+}
+
+float3 McWaterP1Debug(FMaterialPixelParameters P, float Debug, float2 Flow, float2 Strength, float2 Drop,
+    float2 Mode, float4 Site, float Rain, float Clock)
+{
+    if (Debug < 0.5) return 0.0;
+    if (Debug < 1.5)
+    {
+        if (Mode.x > 2.5) return float3(0.52, 0.45, 0.14);
+        if (Mode.x > 1.5) return float3(0.82, 0.04, 0.65);
+        if (Mode.x > 0.5) return Mode.y > 1.5 ? float3(0.04, 0.58, 0.95) : float3(0.84, 0.50, 0.04);
+        return float3(0.03, 0.68, 0.19);
+    }
+    if (Debug < 2.5)
+    {
+        float2 UV = frac(McWaterRelativeMC(P, 0).xy) - 0.5;
+        float2 Dir = Mode.y > 1.5 ? float2(0, -1) : float2(-Flow.y, Flow.x);
+        float Along = dot(UV, Dir);
+        float Across = abs(dot(UV, float2(-Dir.y, Dir.x)));
+        float Head = saturate((0.32 - Along) * 0.92);
+        float Arrow = (Along > -0.35 && Along < 0.34 && Across < (Along > 0.08 ? Head : 0.045)) ? 1.0 : 0.0;
+        return float3(Dir * 0.38 + 0.43, saturate(Strength.x)) * lerp(0.28, 1.5, Arrow);
+    }
+    if (Debug < 3.5) return Site.x < 0.0 ? float3(0.6, 0.02, 0.68) : float3(1.0 - saturate(Site.x / 8), saturate(Site.x / 12), 0.07);
+    if (Debug < 4.5)
+    {
+        float Height = McWaterRelativeMC(P, 0).z;
+        return float3(frac(Height * 0.17), Site.x >= 0.0 ? 0.8 : 0.06, 0.26 + 0.6 * frac(Height));
+    }
+    if (Debug < 5.5) return float3(Drop.y, McWaterP1Air(P, Strength, Drop, Mode), 0.04);
+    if (Debug < 6.5) return float3(0.015, 0.025, 0.035);
+    return float3(Rain, Rain * 0.45, 0.08);
+}
+
+#endif
+#endif
+

@@ -1,0 +1,256 @@
+#ifndef MC_WATER_INTERFACE
+#define MC_WATER_INTERFACE
+
+#include "/MinecraftUEViewer/Private/McWaterMaterial.ush"
+
+#if PIXELSHADER
+
+#define MC_WATER_INTERFACE_SUPPORTED (MATERIAL_SHADINGMODEL_SINGLELAYERWATER && !HIT_PROXY_SHADER && !SCENE_TEXTURES_DISABLED && !SHADING_PATH_MOBILE && SINGLE_LAYER_WATER_SHADING_QUALITY == SINGLE_LAYER_WATER_SHADING_QUALITY_FULL)
+
+float McWaterExitFace(FMaterialPixelParameters P, float EyeInWater, float Role, float Debug)
+{
+#if MC_WATER_INTERFACE_SUPPORTED && defined(PreIntegratedGF)
+    // Minecraft emits the visible underside as a separate top quad. Exclude bottoms,
+    // side faces, and front-facing tops elsewhere in the same view.
+    float3 GeometricNormal = P.TangentToWorld[2];
+    return EyeInWater > 0.5 && Role < 0.5 && Debug < 0.5
+        && GeometricNormal.z < -0.35 && dot(GeometricNormal, P.CameraVector) > 0.0;
+#else
+    return 0.0;
+#endif
+}
+
+float4 McWaterExitOptics(FMaterialPixelParameters P, float ExitFace, float Flat)
+{
+    if (ExitFace < 0.5)
+        return 0.0;
+
+    // P.CameraVector and P.WorldNormal both point into the incident medium here.
+    float3 GeometricNormal = normalize(P.TangentToWorld[2]);
+    float3 WaveNormal = normalize(lerp(P.WorldNormal, GeometricNormal, Flat));
+    float3 Normal = normalize(WaveNormal + GeometricNormal * max(0.0, 0.12 - dot(WaveNormal, GeometricNormal)));
+    float CosIncident = saturate(dot(P.CameraVector, Normal));
+    float CosTransmitted;
+    float Fresnel = McWaterFresnel(CosIncident, McWaterIor, CosTransmitted);
+    if (Fresnel >= 1.0)
+        return float4(0.0, 0.0, 0.0, 1.0);
+
+    float3 Refracted = (McWaterIor * CosIncident - CosTransmitted) * Normal - McWaterIor * P.CameraVector;
+    return float4(Refracted, Fresnel);
+}
+
+#if MC_WATER_INTERFACE_SUPPORTED && defined(PreIntegratedGF)
+float McWaterScreenReflectionDistance(FMaterialPixelParameters P, float Flat);
+#endif
+
+float3 McWaterExitReflection(FMaterialPixelParameters P, float Roughness, float Fresnel, float3 Tint, float P2, float Flat,
+    float2 OpticalScale)
+{
+#if MC_WATER_INTERFACE_SUPPORTED && defined(PreIntegratedGF)
+    // SLW still traces and composites the reflection. Invert the grey EnvBRDF weight
+    // used by its composite to supply the water-to-air Fresnel term in the material F0.
+    float NoV = saturate(dot(normalize(P.WorldNormal), P.CameraVector));
+    float2 AB = Texture2DSampleLevel(PreIntegratedGF, PreIntegratedGFSampler, float2(NoV, Roughness), 0).rg;
+    float3 Weight = Fresnel;
+    [branch] if (P2 > 0.5)
+    {
+        float3 A, S;
+        float Phase;
+        McWaterOpticalPreset(Tint, A, S, Phase);
+        McWaterApplyOpticalScale(OpticalScale, A, S);
+        Weight *= McWaterTransmittance(A + S, McWaterScreenReflectionDistance(P, Flat));
+    }
+    float ShadowingLimit = 0.02 * AB.x + AB.y;
+    return saturate(lerp(Weight / max(AB.x + 50.0 * AB.y, 1e-4),
+        (Weight - AB.y) / max(AB.x, 1e-4), step(ShadowingLimit, Weight)));
+#else
+    return 0.0;
+#endif
+}
+
+float3 McWaterExitReflection(FMaterialPixelParameters P, float Roughness, float Fresnel, float3 Tint, float P2, float Flat)
+{
+    return McWaterExitReflection(P, Roughness, Fresnel, Tint, P2, Flat, 1.0.xx);
+}
+
+#if MC_WATER_INTERFACE_SUPPORTED && defined(PreIntegratedGF)
+
+#if PROJECT_SUPPORT_SKY_ATMOSPHERE
+#include "/Engine/Private/SkyAtmosphereCommon.ush"
+#endif
+
+float3 McWaterExitSky(float3 Ray)
+{
+#if PROJECT_SUPPORT_SKY_ATMOSPHERE
+    if (IsSkyAtmosphereRenderedInMain(ResolvedView.EnvironmentComponentsFlags))
+    {
+        float3 LocalRay = mul(GetSkyViewLutReferential(ResolvedView.SkyViewLutReferential), Ray);
+        float RadiusKm = ResolvedView.SkyAtmosphereBottomRadiusKm;
+        float EyeKm = ResolvedView.SkyPlanetTranslatedWorldCenterAndViewHeight.w * CM_TO_SKY_UNIT;
+        bool Ground = any(RayIntersectSphere(float3(0, 0, EyeKm), LocalRay, float4(0, 0, 0, RadiusKm)) > 0.0);
+        float2 UV;
+        SkyViewLutParamsToUv(Ground, LocalRay.z, LocalRay, EyeKm, RadiusKm, ResolvedView.SkyViewLutSizeAndInvSize, UV);
+        float3 Color = Texture2DSampleLevel(View.SkyViewLutTexture, View.SkyViewLutTextureSampler, UV, 0).rgb;
+        return Color * ResolvedView.SkyAtmosphereSkyLuminanceFactor.rgb * ResolvedView.OneOverPreExposure;
+    }
+#endif
+    return 0.0;
+}
+
+bool McWaterExitProjection(float4 Clip, float4 Bounds, out float2 UV)
+{
+    UV = Clip.xy / max(Clip.w, 1e-4) * ResolvedView.ScreenPositionScaleBias.xy + ResolvedView.ScreenPositionScaleBias.wz;
+    return Clip.w > 0.0 && all(UV >= Bounds.xy) && all(UV <= Bounds.zw);
+}
+
+float McWaterExitDepth(float2 UV)
+{
+    return SingleLayerWater.SceneDepthWithoutSingleLayerWaterTexture.SampleLevel(GlobalPointClampedSampler, UV, 0).r;
+}
+
+float3 McWaterExitColor(float2 UV)
+{
+    return SingleLayerWater.SceneColorWithoutSingleLayerWaterTexture.SampleLevel(GlobalPointClampedSampler, UV, 0).rgb
+        * ResolvedView.OneOverPreExposure;
+}
+
+float McWaterScreenReflectionDistance(FMaterialPixelParameters P, float Flat)
+{
+    float3 Origin = GetTranslatedWorldPosition(P);
+    float3 N = normalize(lerp(P.WorldNormal, P.TangentToWorld[2], Flat));
+    float3 Ray = reflect(-P.CameraVector, N);
+    float4 Start = mul(float4(Origin, 1.0), ResolvedView.TranslatedWorldToClip);
+    float4 Direction = mul(float4(Ray, 0.0), ResolvedView.TranslatedWorldToClip);
+    float4 Bounds = GetSingleLayerWaterRefractionUVMinMax(SingleLayerWater.SceneWithoutSingleLayerWaterTextureSize,
+        SingleLayerWater.SceneWithoutSingleLayerWaterInvTextureSize);
+    float2 UV;
+    float T = 25.0;
+    [loop] for (uint I = 0; I < 6; ++I)
+    {
+        float4 Clip = Start + Direction * T;
+        if (!McWaterExitProjection(Clip, Bounds, UV))
+            break;
+        float Z = McWaterExitDepth(UV);
+        if (Z > Clip.z / Clip.w)
+        {
+            float3 Hit = McWaterPositionAtDepth(UV, Z) - Origin;
+            float BedDistance = dot(Hit, Ray);
+            if (BedDistance > 0.0 && dot(Hit, P.TangentToWorld[2]) > 0.5 &&
+                length(Hit - Ray * BedDistance) < 0.24 * T + 2.0)
+            {
+                return min(25.0, BedDistance * 0.01);
+            }
+        }
+        T = 2.0 * T + 20.0;
+    }
+    return 1.35;
+}
+
+float3 McWaterTraceAir(FMaterialPixelParameters P, float3 Ray, float4 Site)
+{
+    float3 Origin = GetTranslatedWorldPosition(P);
+    float3 AirNormal = -normalize(P.TangentToWorld[2]);
+    if (dot(Ray, AirNormal) <= 0.0)
+        return 0.0;
+
+    float4 Bounds = GetSingleLayerWaterRefractionUVMinMax(SingleLayerWater.SceneWithoutSingleLayerWaterTextureSize,
+        SingleLayerWater.SceneWithoutSingleLayerWaterInvTextureSize);
+    float4 Start = mul(float4(Origin, 1.0), ResolvedView.TranslatedWorldToClip);
+    float4 Direction = mul(float4(Ray, 0.0), ResolvedView.TranslatedWorldToClip);
+    float2 UV = clamp(P.ViewBufferUV, Bounds.xy, Bounds.zw);
+
+    // At normal incidence the eye ray and transmission ray coincide.
+    if (dot(Ray, -P.CameraVector) > 0.99999)
+    {
+        float SceneZ = McWaterExitDepth(UV);
+        if (SceneZ < Start.z / Start.w)
+            return McWaterExitColor(UV);
+    }
+
+    float PreviousDistance = 0.0;
+    float Distance = 8.0;
+    bool RayWasVisible = true;
+    [loop]
+    for (uint Step = 0; Step < 13; ++Step)
+    {
+        float4 Clip = Start + Direction * Distance;
+        if (!McWaterExitProjection(Clip, Bounds, UV))
+            break;
+        float SceneZ = McWaterExitDepth(UV);
+        bool RayIsVisible = SceneZ <= Clip.z / Clip.w;
+        if (!RayIsVisible && RayWasVisible)
+        {
+            float Near = PreviousDistance;
+            float Far = Distance;
+            [unroll]
+            for (uint Refinement = 0; Refinement < 5; ++Refinement)
+            {
+                float Mid = 0.5 * (Near + Far);
+                float4 Probe = Start + Direction * Mid;
+                float2 ProbeUV;
+                McWaterExitProjection(Probe, Bounds, ProbeUV);
+                float ProbeZ = McWaterExitDepth(ProbeUV);
+                if (ProbeZ <= Probe.z / Probe.w)
+                    Near = Mid;
+                else
+                {
+                    Far = Mid;
+                    UV = ProbeUV;
+                    SceneZ = ProbeZ;
+                }
+            }
+            float3 Hit = McWaterPositionAtDepth(UV, SceneZ) - Origin;
+            float HitDistance = dot(Hit, Ray);
+            float Tolerance = 2.0 + 0.005 * (Start.w + Far);
+            // Reject occlusion edges and geometry on the wet side of this interface.
+            if (dot(Hit, AirNormal) > 0.15 && HitDistance > 0.0 && length(Hit - Ray * Far) < Tolerance)
+                return McWaterExitColor(UV);
+        }
+        RayWasVisible = RayIsVisible;
+        PreviousDistance = Distance;
+        Distance = Distance * 1.7 + 8.0;
+    }
+
+    if (McWaterExitProjection(Direction, Bounds, UV) && ConvertFromDeviceZ(McWaterExitDepth(UV)) > 1000000.0)
+        return McWaterExitColor(UV);
+
+    // Off-screen terrain is unavailable. In enclosed water use the view-ray sample
+    // when its position is on the dry side. Open water can use the actual atmosphere LUT.
+    UV = clamp(P.ViewBufferUV, Bounds.xy, Bounds.zw);
+    float DirectZ = McWaterExitDepth(UV);
+    if (Site.w <= 0.0)
+    {
+        if (DirectZ < Start.z / Start.w && DirectZ > 0.0)
+            return McWaterExitColor(UV);
+        // A roofed surface cannot use an unoccluded atmosphere lookup.
+        return 0.012 * float3(0.44, 0.68, 0.79);
+    }
+    return McWaterExitSky(Ray);
+}
+
+#endif
+
+float4 McWaterExitOptics(FMaterialPixelParameters P, float ExitFace)
+{
+    return McWaterExitOptics(P, ExitFace, 0.0);
+}
+
+float3 McWaterExitReflection(FMaterialPixelParameters P, float Roughness, float Fresnel)
+{
+    return McWaterExitReflection(P, Roughness, Fresnel, float3(0.05, 0.183, 0.955), 0.0, 0.0);
+}
+
+float3 McWaterExitTransmission(FMaterialPixelParameters P, float ExitFace, float4 Optics, float4 Site)
+{
+#if MC_WATER_INTERFACE_SUPPORTED && defined(PreIntegratedGF)
+    [branch] if (ExitFace > 0.5 && Optics.w < 1.0)
+        return (1.0 - Optics.w) * McWaterTraceAir(P, Optics.xyz, Site);
+#endif
+    return 0.0;
+}
+
+#undef MC_WATER_INTERFACE_SUPPORTED
+
+#endif // PIXELSHADER
+
+#endif // MC_WATER_INTERFACE

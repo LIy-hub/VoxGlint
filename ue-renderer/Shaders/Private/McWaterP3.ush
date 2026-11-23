@@ -1,0 +1,146 @@
+#ifndef MC_WATER_P3
+#define MC_WATER_P3
+
+#include "/MinecraftUEViewer/Private/McWaterP1.ush"
+#include "/MinecraftUEViewer/Private/McWaterInterface.ush"
+
+float McRippleFade(float2 Position, float Width)
+{
+    float2 Edge = min(Position, Width - Position);
+    return smoothstep(0.0, 2.0, min(Edge.x, Edge.y));
+}
+
+float4 McRippleRead(float2 Local, Texture2D Ripple, float4 Domain)
+{
+    if (Domain.z <= 0.0) return 0.0;
+    float2 Point = Local - Domain.xy;
+    float Weight = McRippleFade(Point, Domain.z);
+    [branch] if (Weight <= 0.0) return 0.0;
+    return Ripple.SampleLevel(GlobalBilinearClampedSampler, Point / Domain.z, 0) * Weight;
+}
+
+#if VERTEXSHADER
+float3 McWaterGeometryOffset(FMaterialVertexParameters P, Texture2D Grid, Texture2D Field,
+    float4 GridInfo, Texture2DArray Displacement, Texture2D Ripple, float4 Domain,
+    float VertexMask, float Wind, float Enabled, float Ready)
+{
+    // VertexMask's bit 6 is the mesher's flat, still top eligibility (both windings).
+    [branch] if (Enabled < 0.5 || Ready < 0.5 || GridInfo.w < 0.5 || ((uint)round(VertexMask * 255.0) & 64u) == 0)
+        return 0.0;
+    float3 Local = McWaterRelativeCoordinates(WSToDF(GetWorldPosition(P)), GridInfo.xyz);
+    // Evaluate the same source coordinate from either side of a region boundary.
+    Local = round(Local * 64.0) / 64.0;
+    [branch] if (any(Local.xy < 1.0) || any(Local.xy >= 255.0)) return 0.0;
+    uint Cell = McWaterColumn(Grid, int2(floor(Local.xy)));
+    if ((Cell & (3u << 26)) != (3u << 26) || abs(Local.z - McWaterColumnTop(Cell)) > 0.048)
+        return 0.0;
+
+    float4 Distance = Field.SampleLevel(GlobalBilinearClampedSampler, Local.xy / 256.0, 0) * (255.0 / 16.0);
+    // The clearance field measures Chebyshev distance between cell centers. Subtract
+    // the obstacle's half-block radius and the interpolation/vertex quantization bounds.
+    float Clearance = min(Distance.r, Distance.b);
+    float Safe = Clearance - 1.53;
+    float WaveDamping = smoothstep(1.5, 5.0, Safe);
+    // Local interactive ripples can displace closer to shore while staying strictly zero
+    // on any vertex adjacent to a dry, shallow-edge or locked cell (Clearance <= 1.0).
+    float RippleDamping = smoothstep(1.05, 2.55, Clearance);
+    // The CPU waterline is queried from the original triangles within one metre
+    // of a half-submerged eye. Anchor that patch while leaving the nearby crests free.
+    float3 Eye = McWaterRelativeCoordinates(WSToDF(GetWorldCameraOrigin(P)), GridInfo.xyz);
+    float NearEye = 1.0 - smoothstep(0.09, 0.22, abs(Eye.z - Local.z));
+    float EyeAnchor = 1.0 - NearEye * (1.0 - smoothstep(1.1, 3.3, length(Eye.xy - Local.xy)));
+    WaveDamping *= EyeAnchor;
+    RippleDamping *= EyeAnchor;
+    [branch] if (max(WaveDamping, RippleDamping) <= 0.0) return 0.0;
+
+    FDFVector3 OriginUE = DFTwoProduct(float3(GridInfo.y, -GridInfo.x, GridInfo.z), float3(100.0, 100.0, 100.0));
+    FDFVector3 Position = DFAdd(OriginUE, float3(Local.y, -Local.x, Local.z) * 100.0);
+    float H0 = Displacement.SampleLevel(GlobalTrilinearWrappedSampler, float3(McWaterUV(Position, McWaterPeriod[0], 0), 0), 0.8).z;
+    float H1 = Displacement.SampleLevel(GlobalTrilinearWrappedSampler, float3(McWaterUV(Position, McWaterPeriod[1], 0), 1), 3.5).z;
+    float LocalH = McRippleRead(Local.xy, Ripple, Domain).a;
+    const float CrestCm = lerp(3.0, 8.0, saturate(Wind));
+    float WaveCm = clamp((H0 + 0.45 * H1) * 22.0, -1.0, 1.0) * CrestCm * WaveDamping;
+    float RippleCm = clamp(LocalH * 115.0, -8.0, 8.0) * RippleDamping;
+    float Offset = clamp(WaveCm + RippleCm, -8.0, 8.0);
+    return float3(0.0, 0.0, Offset);
+}
+#endif
+
+#if PIXELSHADER
+float4 McWaterLocalRipple(FMaterialPixelParameters P, Texture2D Ripple, float4 Domain, float3 GridOrigin, float4 Site)
+{
+    [branch] if (Domain.z <= 0.0) return 0.0;
+    float3 Local = McWaterRelativeMC(P, GridOrigin);
+    float MipFade = 1.0 - smoothstep(Domain.w * 1.2, Domain.w * 4.0,
+        max(length(ddx(Local.xy)), length(ddy(Local.xy))));
+    [branch] if (Site.x < 0.0) return 0.0;
+    float4 Surface = McRippleRead(Local.xy, Ripple, Domain);
+    Surface.xy *= MipFade;
+    return Surface;
+}
+
+float McWaterIceCell(Texture2D Field, int2 Cell)
+{
+    const uint Bits = (uint)round(Field.Load(int3(clamp(Cell, 0, 255), 0)).a * 255.0);
+    return (Bits & 127u) / 127.0;
+}
+
+float McWaterIce(FMaterialPixelParameters P, Texture2D Field, float3 GridOrigin, float4 Site, float Enabled)
+{
+    [branch] if (Enabled < 0.5 || Site.x < 0.0) return 0.0;
+    float2 P0 = McWaterRelativeMC(P, GridOrigin).xy - 0.5;
+    int2 Cell = int2(floor(P0));
+    float2 S = frac(P0);
+    float A = lerp(McWaterIceCell(Field, Cell), McWaterIceCell(Field, Cell + int2(1, 0)), S.x);
+    float B = lerp(McWaterIceCell(Field, Cell + int2(0, 1)), McWaterIceCell(Field, Cell + int2(1, 1)), S.x);
+    return smoothstep(0.04, 0.87, lerp(A, B, S.y));
+}
+
+float3 McWaterP3Reflection(FMaterialPixelParameters P, float4 Strike, float2 SkyFlash, float4 Site, float Role,
+    float Roughness, float Foam, float Enabled, float SkyFallback)
+{
+    [branch] if (Enabled < 0.5 || Role > 0.5 || P.TangentToWorld[2].z < 0.3)
+        return 0.0;
+    float Open = Site.x < 0.0 ? 1.0 : saturate(Site.w * 3.0);
+    [branch] if (Open <= 0.0 || max(SkyFallback, max(Strike.w, SkyFlash.x)) < 0.002) return 0.0;
+    float3 N = normalize(P.WorldNormal);
+    float Facing = saturate(dot(N, P.CameraVector));
+    float Fresnel = 0.0204 + 0.9796 * pow(1.0 - Facing, 5.0);
+    float3 Ray = reflect(-P.CameraVector, N);
+    float3 Sky = 0.0;
+#if MATERIAL_SHADINGMODEL_SINGLELAYERWATER && !HIT_PROXY_SHADER && !SCENE_TEXTURES_DISABLED && !SHADING_PATH_MOBILE && SINGLE_LAYER_WATER_SHADING_QUALITY == SINGLE_LAYER_WATER_SHADING_QUALITY_FULL && defined(PreIntegratedGF)
+    // SSR can supply local highlights with the real skylight disabled. Sample the
+    // atmosphere in that case so off-screen sky still lights open-water waves.
+    [branch] if (SkyFallback > 0.5)
+    {
+        float3 SkyRay = normalize(float3(Ray.xy, max(0.01, Ray.z + Roughness * Roughness * 0.1)));
+        Sky = McWaterExitSky(SkyRay) * 0.82;
+    }
+#endif
+    const float Reflectance = Open * Fresnel * (1.0 - 0.81 * Foam);
+    [branch] if (max(Strike.w, SkyFlash.x) < 0.002) return Sky * Reflectance;
+    float3 PosEyeRelative = (GetTranslatedWorldPosition(P) - ResolvedView.TranslatedWorldCameraOrigin) * 0.01;
+    float3 ToBolt = Strike.xyz - PosEyeRelative;
+    float Distance = max(1.0, length(ToBolt));
+    float3 L = ToBolt / Distance;
+    float Mirror = max(0.0, dot(Ray, L));
+    float AngularWidth = clamp(2.6 / Distance + Roughness * Roughness, 0.022, 0.22);
+    float Glint = exp(-2.0 * (1.0 - Mirror) / (AngularWidth * AngularWidth));
+    float Reach = 1.0 / (1.0 + Distance * Distance * 0.00052);
+    float Lobe = Strike.w * 12.0 * Glint * Reach * smoothstep(0.0, 0.1, L.z);
+    float DiffuseFlash = SkyFlash.x * (0.45 + 0.55 * saturate(Ray.z));
+    return (Sky + float3(0.70, 0.83, 1.0) * ((DiffuseFlash + Lobe) * SkyFlash.y)) * Reflectance;
+}
+
+float3 McWaterP3Debug(FMaterialPixelParameters P, float Debug, float4 Ripple)
+{
+    if (Debug < 8.5)
+        return float3(saturate(-Ripple.a * 38.0), saturate(Ripple.a * 38.0), saturate(length(Ripple.xy) * 0.75));
+    if (Debug < 9.5)
+        return Ripple.z;
+    float Dz = GetTranslatedWorldPosition(P).z - GetTranslatedWorldPosition_NoMaterialOffsets(P).z;
+    return float3(saturate(-Dz / 8.0), saturate(Dz / 8.0), 0.02);
+}
+#endif
+
+#endif

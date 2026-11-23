@@ -1,0 +1,76 @@
+#pragma once
+
+#define GetMaterialVertexParameters McTerrainLocalMaterialVertexParameters
+#include "/Engine/Private/LocalVertexFactory.ush"
+#undef GetMaterialVertexParameters
+
+
+
+int McSigned16(uint X) { return asint(X << 16) >> 16; }
+int McSigned8(uint X) { return asint(X << 24) >> 24; }
+float3 McShorePoint(uint XY, uint Z)
+{
+    return float3(McSigned16(XY), asint(XY) >> 16, (asint(Z << 14) >> 14)) * (100.0 / 64.0);
+}
+
+FMaterialVertexParameters GetMaterialVertexParameters(FVertexFactoryInput Input,
+    FVertexFactoryIntermediates Intermediates, float3 WorldPosition, half3x3 TangentToLocal,
+    bool bIsPreviousFrame = false)
+{
+    FMaterialVertexParameters P = McTerrainLocalMaterialVertexParameters(
+        Input, Intermediates, WorldPosition, TangentToLocal, bIsPreviousFrame);
+#if NUM_MATERIAL_TEXCOORDS_VERTEX > 2
+    UNROLL
+    for (uint Coord = 2; Coord < NUM_MATERIAL_TEXCOORDS_VERTEX; ++Coord)
+    {
+        P.TexCoords[Coord] = 0;
+    }
+#endif
+#if MANUAL_VERTEX_FETCH && NUM_MATERIAL_TEXCOORDS_VERTEX >= 8
+    const uint Word = (Input.VertexId >> 2) * 8;
+    [branch] if (McTerrainFaces.Mode == 2)
+    {
+        uint A = McTerrainFaces.Records[Word];
+        uint B = McTerrainFaces.Records[Word + 1];
+        uint C = McTerrainFaces.Records[Word + 3];
+        uint Edge = B >> 24;
+        P.TexCoords[2] = float2(McSigned8(A >> 24), -McSigned8(A >> 16)) / 127.0;
+        P.TexCoords[3] = ((A >> 2) & 3) == 2
+            ? float2((C >> 16) & 255, C >> 24)
+            : float2(B & 255, (B >> 8) & 255) / 255.0;
+        P.TexCoords[4] = float2(C & 255, (C >> 8) & 255) * float2(1, 1.0 / 255.0);
+        P.TexCoords[5] = float2(A & 3, (A >> 2) & 3);
+        P.TexCoords[6] = float2(Edge & 1, (Edge >> 1) & 1);
+        P.TexCoords[7] = float2((Edge >> 2) & 1, (Edge >> 3) & 1);
+    }
+    else if (McTerrainFaces.Mode == 1)
+    {
+        UNROLL
+        for (uint I = 0; I < 2; ++I)
+        {
+            uint S = Word + I * 4;
+            uint2 A = uint2(McTerrainFaces.Records[S], McTerrainFaces.Records[S + 1]);
+            uint2 B = uint2(McTerrainFaces.Records[S + 2], McTerrainFaces.Records[S + 3]);
+            const uint ZMask = (1u << 18) - 1;
+            uint Stamp = (A.y >> 18) | ((B.y >> 18) << 14);
+            uint Now = (uint)(View.GameTime * 16.0);
+            float Fade = Stamp ? saturate(1.0 - float((Now - Stamp) & ((1u << 28) - 1)) / 128.0) : 1.0;
+            bool Valid = A.x != B.x || (A.y & ZMask) != (B.y & ZMask);
+            float3 Start = Valid ? McShorePoint(A.x, A.y) - P.PositionPrimitiveSpace : 0;
+            float3 Span = Valid ? McShorePoint(B.x, B.y) - McShorePoint(A.x, A.y) : 0;
+            // Shore segments have one horizontal axis. The signed span carries orientation.
+            if (Span.x < 0.0 || Span.y < 0.0)
+            {
+                Start += Span;
+                Span = -Span;
+            }
+            float SignedSpan = Span.x > 0.0 ? Span.x : -Span.y;
+            P.TexCoords[2 + I * 3] = Start.xy;
+            P.TexCoords[3 + I * 3] = float2(Start.z, SignedSpan);
+            P.TexCoords[4 + I * 3] = float2(Span.z, Valid ? Fade : 0);
+        }
+    }
+#endif
+    return P;
+}
+

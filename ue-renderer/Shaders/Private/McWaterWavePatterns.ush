@@ -1,0 +1,21 @@
+#ifndef MC_WATER_WAVE_PATTERNS
+#define MC_WATER_WAVE_PATTERNS
+
+float2 McWaterFlowPattern(float2 UV, bool Curl)
+{
+    const float Tau = 6.2831853;
+    float A = (UV.x * 13.0 + UV.y * 7.0) * Tau;
+    float B = (UV.y * 17.0 - UV.x * 5.0) * Tau;
+    return Curl ? float2(cos(A + 0.62 * sin(B)), sin(B + 0.71 * cos(A))) : float2(cos(A), sin(B));
+}
+
+float2 McWaterPressurePulse(float Radius)
+{
+    // The compact, zero-integral P3 pressure impulse and its analytic radial derivative.
+    const float R2 = min(1.0, Radius * Radius);
+    const float Rest = 1.0 - R2;
+    const float Rest2 = Rest * Rest;
+    return float2((1.0 - 5.0 * R2) * Rest2 * Rest, -8.0 * Radius * (2.0 - 5.0 * R2) * Rest2);
+}
+
+#endif

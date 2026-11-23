@@ -1,0 +1,290 @@
+#ifndef MC_WATER_MATERIAL
+#define MC_WATER_MATERIAL
+
+#include "/MinecraftUEViewer/Private/McWaterCommon.ush"
+
+float2 McWaterUV(FDFVector3 PositionCm, float Period, float2 OffsetCm)
+{
+    float PeriodCm = Period * 100.0;
+    // Fold the large component before adding the view-aligned residual. Mip gradients use
+    // untranslated local differences so a periodic seam never looks like a large footprint.
+    return frac((fmod(PositionCm.High.xy, PeriodCm) + PositionCm.Low.xy + OffsetCm) / PeriodCm);
+}
+
+#if PIXELSHADER
+
+#if VIRTUAL_SHADOW_MAP && MATERIAL_SHADINGMODEL_SINGLELAYERWATER && !SCENE_TEXTURES_DISABLED && !SHADING_PATH_MOBILE
+#include "/Engine/Private/VirtualShadowMaps/VirtualShadowMapProjectionCommon.ush"
+#endif
+
+float McWaterRainExposure(FMaterialPixelParameters P, Texture2D PrecipGrid, float3 Origin, float GridValid, float LocalRain)
+{
+    if (LocalRain <= 0.005 || GridValid < 0.5)
+        return LocalRain > 0.005 ? 1.0 : 0.0;
+    FDFVector3 World = WSToDF(GetWorldPosition_NoMaterialOffsets(P));
+    float2 RelativeMc = float2(-World.High.y, World.High.x) * 0.01 - Origin.xy
+        + float2(-World.Low.y, World.Low.x) * 0.01;
+    float2 UV = (floor(RelativeMc) + 0.5) / Origin.z;
+    if (any(UV <= 0.0) || any(UV >= 1.0))
+        return 1.0;
+    float4 Cell = PrecipGrid.SampleLevel(GlobalPointClampedSampler, UV, 0);
+    float RainBiome = smoothstep(0.25, 0.45, Cell.g) * (1.0 - smoothstep(0.60, 0.80, Cell.g));
+    return Cell.b < 0.5 ? 1.0 : RainBiome * smoothstep(-22.0, -2.0, (World.High.z - Cell.r) + World.Low.z);
+}
+
+float4 McWaterSurface(FMaterialPixelParameters P, float3 RelativePosition, Texture2DArray Derivatives,
+    Texture2DArray Moments, float Ready, float Wind, float Exposed, Texture2D PackNormals,
+    SamplerState PackSampler, float2 AtlasUV, float PackWeight, float3 Waves, float3 Motion, float ExitFace, float2 RippleSlope)
+{
+    float Roughness = lerp(0.018, 0.025, Wind);
+    float3 Flat = float3(0.0, 0.0, 1.0);
+    float Side = ExitFace > 0.5 ? -1.0 : 1.0;
+    Motion *= Side;
+    float3 GeometricNormal = P.TangentToWorld[2];
+    float Upward = smoothstep(0.1, 0.9, GeometricNormal.z * Side);
+    [branch] if (Ready < 0.5 || (max(max(Waves.x, Waves.y), Waves.z) + Exposed) < 0.001)
+    {
+        float3 Perturbation = Motion - float3(RippleSlope * Upward * Side, 0.0);
+        float3 Normal = normalize(Flat + TransformWorldVectorToTangent(P.TangentToWorld, Perturbation));
+        return float4(Normal, Roughness);
+    }
+
+    FDFVector3 Position = WSToDF(GetWorldPosition_NoMaterialOffsets(P));
+    float2 DpDx = ddx(RelativePosition.xy) * 0.01;
+    float2 DpDy = ddy(RelativePosition.xy) * 0.01;
+    float Footprint = max(length(DpDx), length(DpDy));
+    float2 Slope = RippleSlope;
+    float Variance = 0.0;
+    [unroll]
+    for (uint Cascade = 0; Cascade < MC_WATER_CASCADES; ++Cascade)
+    {
+        float Weight = Waves[Cascade];
+        if (ExitFace > 0.5)
+        {
+            if (Cascade == 1) Weight *= 0.56;
+            if (Cascade == 2) Weight *= 0.28 * (1.0 - smoothstep(0.015, 0.090, Footprint));
+        }
+        if (Weight <= 0.001 && (Cascade != 1 || Exposed <= 0.001)) continue;
+        float Period = McWaterPeriod[Cascade];
+        float3 UV = float3(McWaterUV(Position, Period, 0), Cascade);
+        float2 Gx = DpDx / Period;
+        float2 Gy = DpDy / Period;
+        float4 Gradients = Derivatives.SampleGrad(GlobalTrilinearWrappedSampler, UV, Gx, Gy);
+        float4 SecondMoment = Moments.SampleGrad(GlobalTrilinearWrappedSampler, UV, Gx, Gy);
+        Slope += McWaterDisplacedSlope(Gradients) * Weight;
+        float Filtered = smoothstep(0.65, 2.4, Footprint * 128.0 / Period);
+        Variance += max(0.0, SecondMoment.x - dot(Gradients.xy, Gradients.xy)) * Filtered * Weight * Weight;
+        if (Cascade == 1)
+        {
+            Slope += SecondMoment.gb * Exposed;
+            Variance += max(0.0, SecondMoment.a - dot(SecondMoment.gb, SecondMoment.gb)) * Filtered * Exposed * Exposed;
+        }
+    }
+    float3 WaveNormal = normalize(GeometricNormal - float3(Slope * Upward * Side, 0.0) + Motion);
+    float3 TangentNormal = TransformWorldVectorToTangent(P.TangentToWorld, WaveNormal);
+    float2 PackDx = ddx(AtlasUV);
+    float2 PackDy = ddy(AtlasUV);
+    [branch] if (PackWeight > 0.001)
+    {
+        float3 Encoded = PackNormals.SampleGrad(PackSampler, AtlasUV, PackDx, PackDy).rgb;
+        float3 PackNormal = normalize(float3((Encoded.rg * 255.0 - 128.0) / 127.0, max(0.004, Encoded.b * 2.0 - 1.0)));
+        TangentNormal = normalize(TangentNormal + (PackNormal - Flat) * PackWeight);
+    }
+    // UE's roughness is perceptual. Variance broadens the GGX alpha before conversion back.
+    Roughness = sqrt(Roughness * Roughness + min(Variance * 0.68 * Upward, 0.25));
+    return float4(TangentNormal, Roughness);
+}
+
+float4 McWaterSurface(FMaterialPixelParameters P, float3 RelativePosition, Texture2DArray Derivatives,
+    Texture2DArray Moments, float Ready, float Wind, float Exposed, Texture2D PackNormals,
+    SamplerState PackSampler, float2 AtlasUV, float PackWeight, float3 Waves, float3 Motion, float ExitFace)
+{
+    return McWaterSurface(P, RelativePosition, Derivatives, Moments, Ready, Wind, Exposed, PackNormals,
+        PackSampler, AtlasUV, PackWeight, Waves, Motion, ExitFace, 0.0);
+}
+
+float2 McWaterCrestData(FMaterialPixelParameters P, float3 RelativePosition, Texture2DArray Displacement, float Ready, float3 Waves)
+{
+    [branch] if (Ready < 0.5 || max(Waves.x, Waves.y) < 0.001)
+        return 0.0;
+    FDFVector3 Position = WSToDF(GetWorldPosition_NoMaterialOffsets(P));
+    float2 DpDx = ddx(RelativePosition.xy) * 0.01;
+    float2 DpDy = ddy(RelativePosition.xy) * 0.01;
+    float2 CrestData = 0.0;
+    [unroll]
+    for (uint Cascade = 0; Cascade < MC_WATER_CASCADES; ++Cascade)
+    {
+        float Weight = Waves[Cascade];
+        if (Weight <= 0.001) continue;
+        float Period = McWaterPeriod[Cascade];
+        float3 UV = float3(McWaterUV(Position, Period, 0), Cascade);
+        float4 Displaced = Displacement.SampleGrad(GlobalTrilinearWrappedSampler, UV, DpDx / Period, DpDy / Period);
+        CrestData.x = max(CrestData.x, Displaced.a * Weight * Weight);
+        CrestData.y += Cascade < 2 ? Displaced.z * Weight : 0.0;
+    }
+    return CrestData * smoothstep(0.1, 0.9, P.TangentToWorld[2].z);
+}
+
+float3 McWaterPositionAtDepth(float2 BufferUV, float DeviceZ)
+{
+    return SvPositionToResolvedTranslatedWorld(float4(BufferUV * ResolvedView.BufferSizeAndInvSize.xy, max(DeviceZ, 1e-12), 1.0));
+}
+
+float McWaterVerticalDepth(FMaterialPixelParameters P, float SceneDepth)
+{
+    float3 Bed = McWaterPositionAtDepth(P.ViewBufferUV, ConvertToDeviceZ(SceneDepth));
+    return max(0.0, GetTranslatedWorldPosition(P).z - Bed.z);
+}
+
+float McWaterTransmissionShadow(float3 SurfacePosition, float SurfaceDepth, float3 SunDirection)
+{
+#if VIRTUAL_SHADOW_MAP && MATERIAL_SHADINGMODEL_SINGLELAYERWATER && !SCENE_TEXTURES_DISABLED && !SHADING_PATH_MOBILE
+    const int ShadowMapId = OpaqueBasePass.Shared.Forward.DirectionalLightVSM;
+    if (ShadowMapId != INDEX_NONE)
+    {
+        FVirtualShadowMapSampleResult M = SampleVirtualShadowMapDirectional(
+            ShadowMapId, SurfacePosition + SunDirection * 2.0, 0.0, SurfaceDepth);
+        return M.bValid ? M.ShadowFactor : 0.0;
+    }
+#endif
+    return 0.0;
+}
+
+// XY is the accepted SLW background UV, Z is its linear view depth in cm.
+float3 McWaterBackgroundSample(FMaterialPixelParameters P, float SceneDepth, float SurfaceDepth, float Refraction)
+{
+    float2 UV = P.ViewBufferUV;
+#if MATERIAL_SHADINGMODEL_SINGLELAYERWATER && !SCENE_TEXTURES_DISABLED && !SHADING_PATH_MOBILE && REFRACTION_USE_PIXEL_NORMAL_OFFSET
+    float4 Bounds = GetSingleLayerWaterRefractionUVMinMax(SingleLayerWater.SceneWithoutSingleLayerWaterTextureSize,
+        SingleLayerWater.SceneWithoutSingleLayerWaterInvTextureSize);
+    UV = clamp(UV, Bounds.xy, Bounds.zw);
+    float DeviceZ;
+    float4 Weights, RefractionMask;
+    SampleSceneDepthWithoutWaterBilateral(SingleLayerWater.SceneDepthWithoutSingleLayerWaterTexture,
+        SingleLayerWaterSceneDepthSampler, UV, SingleLayerWater.SceneWithoutSingleLayerWaterTextureSize,
+        SingleLayerWater.SceneWithoutSingleLayerWaterInvTextureSize, SurfaceDepth,
+#if SINGLE_LAYER_WATER_REFRACTION_MASK_AVAILABLE
+        SingleLayerWater.RefractionMaskTexture,
+#endif
+        DeviceZ, SceneDepth, Weights, RefractionMask);
+    const float4 Distortion = SingleLayerWater.DistortionParams;
+    half3 PixelNormal = normalize(TransformWorldVectorToView(P.WorldNormal));
+    half3 VertexNormal = TransformTangentVectorToView(P, float3(0, 0, 1));
+    float2 Delta = (VertexNormal.xy - PixelNormal.xy) * (Refraction - 1.0);
+    Delta *= ResolvedView.ViewSizeAndInvSize.xy * ResolvedView.BufferSizeAndInvSize.zw;
+    Delta *= Distortion.zw * float2(0.00023, -0.00023) * float2(Distortion.x, Distortion.x * Distortion.y);
+    Delta *= (4.0 / 30.0) * saturate(SceneDepth - SurfaceDepth)
+        * clamp(SceneDepth - SurfaceDepth, 0.0, 30.0);
+    float2 DistortedUV = clamp(UV + Delta, Bounds.xy, Bounds.zw);
+    float RefractedDeviceZ, RefractedDepth;
+    SampleSceneDepthWithoutWaterBilateral(SingleLayerWater.SceneDepthWithoutSingleLayerWaterTexture,
+        SingleLayerWaterSceneDepthSampler, DistortedUV, SingleLayerWater.SceneWithoutSingleLayerWaterTextureSize,
+        SingleLayerWater.SceneWithoutSingleLayerWaterInvTextureSize, SurfaceDepth,
+#if SINGLE_LAYER_WATER_REFRACTION_MASK_AVAILABLE
+        SingleLayerWater.RefractionMaskTexture,
+#endif
+        RefractedDeviceZ, RefractedDepth, Weights, RefractionMask);
+    if (any(Weights > 0.0))
+    {
+        UV = DistortedUV;
+        SceneDepth = RefractedDepth;
+    }
+#endif
+    return float3(UV, SceneDepth);
+}
+
+float3 McWaterCausticColor(FMaterialPixelParameters P, Texture2DArray Caustics, float SceneDepth, float SurfaceDepth,
+    float Refraction, float3 SunDirection, float SunPower, float Ready, float WaveEnergy)
+{
+    float3 Surface = GetTranslatedWorldPosition(P);
+    float PixelWidth = max(length(ddx(Surface.xy)), length(ddy(Surface.xy))) * 0.01;
+    [branch] if (Ready < 0.5 || WaveEnergy <= 0.001 || SunPower <= 0.0 || SceneDepth <= SurfaceDepth || P.TangentToWorld[2].z < 0.35)
+        return 1.0;
+    float3 Sample = McWaterBackgroundSample(P, SceneDepth, SurfaceDepth, Refraction);
+    float3 Bed = McWaterPositionAtDepth(Sample.xy, ConvertToDeviceZ(max(SurfaceDepth, Sample.z)));
+    float DepthCm = max(0.0, Surface.z - Bed.z);
+    float DepthM = DepthCm * 0.01;
+    float Envelope = smoothstep(0.08, 0.40, DepthM) * (1.0 - smoothstep(10.0, 14.0, DepthM));
+    [branch] if (Envelope <= 0.0)
+        return 1.0;
+
+    float3 Ray = McWaterRefractSun(SunDirection, 0.0);
+    float2 Projected = Bed.xy - Ray.xy * (DepthCm / max(0.25, -Ray.z));
+    float Shadow = McWaterTransmissionShadow(float3(Projected, Surface.z), SurfaceDepth, SunDirection);
+    [branch] if (Shadow <= 0.0)
+        return 1.0;
+    FDFVector3 WorldSurface = WSToDF(GetWorldPosition(P));
+    float2 UV = McWaterUV(WorldSurface, McWaterPeriod[1], Projected - Surface.xy);
+    float2 Dispersion = 0.015 * DepthM * Ray.xy / McWaterPeriod[1];
+    float Mip = max(log2(max(1.0, PixelWidth * 256.0 / McWaterPeriod[1])), smoothstep(4.5, 13.5, DepthM) * 4.0);
+    float3 Focus = float3(
+        Caustics.SampleLevel(GlobalTrilinearWrappedSampler, float3(UV - Dispersion, 0), Mip).r,
+        Caustics.SampleLevel(GlobalTrilinearWrappedSampler, float3(UV, 0), Mip).r,
+        Caustics.SampleLevel(GlobalTrilinearWrappedSampler, float3(UV + Dispersion, 0), Mip).r);
+    return 1.0 + Focus * (0.52 * SunPower * Envelope * Shadow * WaveEnergy);
+}
+
+float McWaterFoam(FMaterialPixelParameters P, Texture2D Lace, Texture2D Micro, float DepthCm, float2 FoamAndHeight)
+{
+    float Crest = 0.85 * FoamAndHeight.x;
+    float Shore = (1.0 - smoothstep(4.0, 28.0, DepthCm)) * smoothstep(0.8, 3.5, DepthCm);
+    Shore *= smoothstep(0.14, 0.82, P.TangentToWorld[2].z);
+    float2 GradX = ddx(GetTranslatedWorldPosition_NoMaterialOffsets(P).xy) * 0.01;
+    float2 GradY = ddy(GetTranslatedWorldPosition_NoMaterialOffsets(P).xy) * 0.01;
+    [branch] if (Shore + Crest < 0.001)
+        return 0.0;
+    FDFVector3 World = WSToDF(GetWorldPosition_NoMaterialOffsets(P));
+    float Surge = clamp(FoamAndHeight.y * 5.0, -0.22, 0.22);
+    float Pores = Micro.SampleGrad(GlobalTrilinearWrappedSampler, McWaterUV(World, 0.86, 0), GradX / 0.86, GradY / 0.86).r;
+    float2 FilmOffsetCm = float2(1.0, -0.62) * (7.0 * (Pores - 0.5) + 10.0 * Surge);
+    float Film = Lace.SampleGrad(GlobalTrilinearWrappedSampler, McWaterUV(World, 2.70, FilmOffsetCm),
+        GradX / 2.70, GradY / 2.70).r;
+    float Pattern = 0.60 * Film + 0.40 * Pores;
+    float ShoreDensity = saturate(Shore * (0.78 + Surge));
+    float ShoreFoam = 0.68 * ShoreDensity * smoothstep(0.54 - 0.19 * ShoreDensity, 0.74 - 0.19 * ShoreDensity, Pattern);
+    float CrestFoam = Crest * smoothstep(0.55 - 0.31 * Crest, 0.72 - 0.31 * Crest, Pattern);
+    return max(ShoreFoam, CrestFoam);
+}
+
+float McWaterCrest(FMaterialPixelParameters P, float HeightM, float3 SunDirection, float SunPower)
+{
+    float Backlight = saturate(dot(-P.CameraVector, SunDirection));
+    return smoothstep(0.012, 0.12, HeightM) * pow(Backlight, 4.0) * saturate(SunPower * 2.0);
+}
+
+#endif // PIXELSHADER
+
+#include "/MinecraftUEViewer/Private/McWaterOptics.ush"
+
+void McWaterCoefficients(float3 Tint, float P2, out float3 Absorption, out float3 Scattering)
+{
+    if (P2 > 0.5)
+    {
+        float Phase;
+        McWaterOpticalPreset(Tint, Absorption, Scattering, Phase);
+        Absorption *= 0.01;
+        Scattering *= 0.01;
+        return;
+    }
+    // Relative linear RGB makes the classification insensitive to AO or overall tint brightness.
+    float GreenToBlue = Tint.g / max(Tint.b, 0.01);
+    float3 TemperateAbsorption = float3(0.0042, 0.00145, 0.00072);
+    float3 TemperateScattering = float3(0.000003, 0.000010, 0.000014);
+    float Cold = 1.0 - smoothstep(0.155, 0.24, GreenToBlue);
+    float Warm = smoothstep(0.52, 0.68, GreenToBlue);
+    float Swamp = smoothstep(0.96, 1.26, GreenToBlue);
+    Absorption = lerp(TemperateAbsorption, float3(0.0048, 0.00170, 0.00085), Cold);
+    Absorption = lerp(Absorption, float3(0.0024, 0.00055, 0.00028), Warm);
+    Absorption = lerp(Absorption, float3(0.0055, 0.00380, 0.00750), Swamp);
+    Scattering = lerp(TemperateScattering, float3(0.0000018, 0.0000045, 0.000008), Cold);
+    Scattering = lerp(Scattering, float3(0.0000032, 0.000018, 0.000015), Warm);
+    Scattering = lerp(Scattering, float3(0.00014, 0.00023, 0.000054), Swamp);
+}
+
+// Keep the frozen graph usable until its material asset has been regenerated.
+void McWaterCoefficients(float3 Tint, out float3 Absorption, out float3 Scattering)
+{
+    McWaterCoefficients(Tint, 0.0, Absorption, Scattering);
+}
+
+#endif // MC_WATER_MATERIAL

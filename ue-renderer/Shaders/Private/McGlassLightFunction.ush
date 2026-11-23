@@ -1,0 +1,121 @@
+#ifndef MC_GLASS_LIGHT_FUNCTION
+#define MC_GLASS_LIGHT_FUNCTION 1
+
+// Three R32G32B32A32 texels per node, followed by one texel per packed grid cell.
+// As in BridgeGlassLighting.cpp, rows are 512 texels.
+float4 McGlassLoad(Texture2D Volumes, uint Index)
+{
+    return Volumes.Load(int3(Index & 511u, Index >> 9u, 0));
+}
+
+float2 McGlassInterval(float3 Origin, float3 InverseDirection, bool3 Parallel,
+    float3 MinCorner, float3 MaxCorner, float Limit)
+{
+    // Half-open faces ensure a ray on the boundary of two neighboring cubes counts exactly one cube.
+    const bool3 Outside = select(Origin < MinCorner, true, Origin >= MaxCorner);
+    if (any(select(Parallel, Outside, false))) return 0.f;
+    const float3 A = (MinCorner - Origin) * InverseDirection;
+    const float3 B = (MaxCorner - Origin) * InverseDirection;
+    const float3 Entry = select(Parallel, -1.e10f, min(A, B));
+    const float3 Exit = select(Parallel, 1.e10f, max(A, B));
+    const float First = max(0.f, max(Entry.x, max(Entry.y, Entry.z)));
+    const float Last = min(Limit, min(Exit.x, min(Exit.y, Exit.z)));
+    return float2(First, Last);
+}
+
+float McGlassPlanarDepth(Texture2D Volumes, uint FirstCell, uint Axis, float3 MinCorner, float3 MaxCorner,
+    float3 Origin, float3 Direction, float2 Interval, float3 Channel)
+{
+    const uint U = (Axis + 1u) % 3u;
+    const uint V = (Axis + 2u) % 3u;
+    const int2 Size = int2(MaxCorner[U] - MinCorner[U], MaxCorner[V] - MinCorner[V]);
+    const float3 Enter = (Origin - MinCorner) + Direction * Interval.x;
+    const float2 Start = clamp(float2(Enter[U], Enter[V]), 0.f, float2(Size));
+    const float2 Slope = float2(Direction[U], Direction[V]);
+    const bool2 Parallel = abs(Slope) < 1.e-8f;
+    const bool2 Decreasing = Slope < 0.f;
+    const int2 Step = select(Decreasing, -1, 1);
+    // In the decreasing direction an exact boundary starts in the preceding cell.
+    const int2 EntryCell = int2(select(Decreasing, ceil(Start) - 1.f, floor(Start)));
+    int2 Cell = clamp(EntryCell, 0, Size - 1);
+    const float2 Inverse = rcp(select(Parallel, 1.f, Slope));
+    const float2 Boundary = float2(Cell + max(Step, 0));
+    float2 Next = select(Parallel, 1.e10f, max(0.f, (Boundary - Start) * Inverse));
+    const float2 Delta = abs(Inverse);
+    const float Limit = Interval.y - Interval.x;
+
+    float Depth = 0.f;
+    float Distance = 0.f;
+    [loop]
+    for (uint Crossings = 0; Crossings < 32u && Distance < Limit; ++Crossings)
+    {
+        const float Exit = min(Limit, min(Next.x, Next.y));
+        const float Thickness = Exit - Distance;
+        if (Thickness > 0.f)
+        {
+            const uint Index = FirstCell + uint(Cell.x + Cell.y * Size.x);
+            const float Extinction = dot(McGlassLoad(Volumes, Index).xyz, Channel);
+            if (Extinction < 0.f) return -1.f;
+            Depth += Thickness * Extinction;
+        }
+        if (Exit >= Limit) break;
+
+        // True corners advance both axes, avoiding an extra zero-width cell at a tie.
+        const bool2 Crossed = Next <= Exit;
+        Cell += select(Crossed, Step, 0);
+        if (any(Cell < 0) || any(Cell >= Size)) break;
+        Next += select(Crossed, Delta, 0.f);
+        Distance = Exit;
+    }
+    return Depth;
+}
+
+float McGlassTransmission(Texture2D Volumes, uint NodeCount, float3 Origin, float4 LightRay, float3 Channel)
+{
+    const bool Directional = LightRay.w > 0.5f;
+    const float3 ToLight = Directional ? LightRay.xyz : LightRay.xyz - Origin;
+    const float Distance = length(ToLight);
+    if (NodeCount == 0 || Distance < 1.e-6f) return 1.f;
+    const float3 Direction = ToLight / Distance;
+    const bool3 Parallel = abs(Direction) < 1.e-8f;
+    const float3 InverseDirection = rcp(select(Parallel, 1.f, Direction));
+    const float Limit = Directional ? 1.e7f : Distance;
+
+    // The BVH is in preorder. A node's escape index jumps to its sibling or nearest ancestor's sibling.
+    float OpticalDepth = 0.f;
+    uint Node = 0;
+    [loop]
+    while (Node < NodeCount)
+    {
+        const float4 MinCorner = McGlassLoad(Volumes, Node * 3u);
+        const float4 MaxCorner = McGlassLoad(Volumes, Node * 3u + 1u);
+        const float2 Interval = McGlassInterval(Origin, InverseDirection, Parallel, MinCorner.xyz, MaxCorner.xyz, Limit);
+        const float Thickness = Interval.y - Interval.x;
+        if (Thickness <= 0.f)
+        {
+            Node = uint(MinCorner.w);
+            continue;
+        }
+        if (MaxCorner.w > 0.5f)
+        {
+            const float3 Data = McGlassLoad(Volumes, Node * 3u + 2u).xyz;
+            if (MaxCorner.w < 1.5f)
+            {
+                const float Extinction = dot(Data, Channel);
+                if (Extinction < 0.f) return 0.f;
+                OpticalDepth += Thickness * Extinction;
+            }
+            else
+            {
+                const float Depth = McGlassPlanarDepth(Volumes, uint(Data.x), uint(MaxCorner.w) - 2u,
+                    MinCorner.xyz, MaxCorner.xyz, Origin, Direction, Interval, Channel);
+                if (Depth < 0.f) return 0.f;
+                OpticalDepth += Depth;
+            }
+        }
+        ++Node;
+    }
+    return exp2(-OpticalDepth);
+}
+
+#endif

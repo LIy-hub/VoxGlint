@@ -1,0 +1,65 @@
+{
+  "license": "CC0-1.0",
+  "fallback": {"roughness": 0.90, "metallic": 0.0, "emissive": 0.0, "ao": 1.0, "porosity": 0.65},
+  "materials": [
+    {"roughness": 0.38, "emissive": 1.0, "porosity": 0.0, "textures": [
+      "minecraft:block/lava_*", "minecraft:block/glowstone", "minecraft:block/sea_lantern", "minecraft:block/*_froglight_*"
+    ]},
+    {"roughness": 0.52, "emissive": 0.8, "porosity": 0.0, "textures": [
+      "minecraft:block/redstone_lamp_on", "minecraft:block/*_copper_bulb_lit*", "minecraft:block/copper_bulb_lit*",
+      "minecraft:block/lantern", "minecraft:block/soul_lantern", "minecraft:block/copper_lantern",
+      "minecraft:block/*_copper_lantern", "minecraft:block/jack_o_lantern", "minecraft:block/end_rod",
+      "minecraft:block/torch", "minecraft:block/copper_torch", "minecraft:block/soul_torch", "minecraft:block/redstone_torch",
+      "minecraft:block/fire_*", "minecraft:block/soul_fire_*"
+    ]},
+    {"roughness": 0.74, "emissive": 0.25, "porosity": 0.25, "textures": [
+      "minecraft:block/magma", "minecraft:block/crying_obsidian", "minecraft:block/glow_lichen", "minecraft:block/sculk_vein"
+    ]},
+    {"roughness": 0.035, "metallic": 1.0, "porosity": 0.0, "textures": [
+      "minecraft:block/iron_block", "minecraft:block/gold_block", "minecraft:block/copper_block",
+      "minecraft:block/cut_copper", "minecraft:block/chiseled_copper"
+    ]},
+    {"roughness": 0.12, "metallic": 1.0, "porosity": 0.0, "textures": [
+      "minecraft:block/iron_bars", "minecraft:block/iron_chain", "minecraft:block/chain",
+      "minecraft:block/iron_door_*", "minecraft:block/iron_trapdoor", "minecraft:block/copper_bars",
+      "minecraft:block/copper_chain", "minecraft:block/copper_door_*", "minecraft:block/copper_grate", "minecraft:block/copper_trapdoor"
+    ]},
+    {"roughness": 0.57, "metallic": 0.65, "porosity": 0.15, "textures": [
+      "minecraft:block/exposed_copper*", "minecraft:block/exposed_cut_copper", "minecraft:block/exposed_chiseled_copper",
+      "minecraft:block/netherite_block", "minecraft:block/anvil*", "minecraft:block/*_anvil_top"
+    ]},
+    {"roughness": 0.74, "metallic": 0.25, "porosity": 0.35, "textures": [
+      "minecraft:block/weathered_copper*", "minecraft:block/weathered_cut_copper", "minecraft:block/weathered_chiseled_copper",
+      "minecraft:block/oxidized_copper*", "minecraft:block/oxidized_cut_copper", "minecraft:block/oxidized_chiseled_copper"
+    ]},
+    {"roughness": 0.020, "porosity": 0.0, "textures": ["minecraft:block/water_*"]},
+    {"roughness": 0.025, "porosity": 0.0, "textures": [
+      "minecraft:block/glass", "minecraft:block/glass_pane_top", "minecraft:block/tinted_glass",
+      "minecraft:block/*_stained_glass", "minecraft:block/*_stained_glass_pane_top"
+    ]},
+    {"roughness": 0.08, "porosity": 0.0, "textures": [
+      "minecraft:block/ice", "minecraft:block/packed_ice", "minecraft:block/blue_ice", "minecraft:block/frosted_ice_*",
+      "minecraft:block/obsidian"
+    ]},
+    {"roughness": 0.25, "porosity": 0.05, "textures": [
+      "minecraft:block/diamond_block", "minecraft:block/emerald_block", "minecraft:block/amethyst_block",
+      "minecraft:block/amethyst_cluster", "minecraft:block/*_amethyst_bud", "minecraft:block/budding_amethyst"
+    ]},
+    {"roughness": 0.40, "porosity": 0.25, "textures": [
+      "minecraft:block/*_glazed_terracotta", "minecraft:block/polished_*", "minecraft:block/smooth_stone*",
+      "minecraft:block/quartz_block_*", "minecraft:block/quartz_pillar_*"
+    ]},
+    {"roughness": 0.71, "porosity": 0.72, "textures": [
+      "minecraft:block/*_planks", "minecraft:block/*_stem_top", "minecraft:block/*_log", "minecraft:block/*_log_top",
+      "minecraft:block/crimson_stem", "minecraft:block/warped_stem", "minecraft:block/bamboo_block*"
+    ]},
+    {"roughness": 0.83, "porosity": 0.65, "textures": [
+      "minecraft:block/stone", "minecraft:block/cobblestone", "minecraft:block/*_ore", "minecraft:block/raw_*_block",
+      "minecraft:block/*sandstone*", "minecraft:block/*_concrete", "minecraft:block/*terracotta", "minecraft:block/*bricks"
+    ]},
+    {"roughness": 0.98, "porosity": 0.90, "textures": [
+      "minecraft:block/*_wool", "minecraft:block/*_leaves", "minecraft:block/dirt", "minecraft:block/grass_block_*",
+      "minecraft:block/sand", "minecraft:block/red_sand", "minecraft:block/*_concrete_powder", "minecraft:block/snow", "minecraft:block/gravel"
+    ]}
+  ]
+}

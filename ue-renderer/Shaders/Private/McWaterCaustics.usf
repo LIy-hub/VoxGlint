@@ -1,0 +1,122 @@
+#include "/Engine/Public/Platform.ush"
+#include "/MinecraftUEViewer/Private/McWaterCommon.ush"
+
+float3 SunDirection;
+float Rain;
+Texture2DArray<float4> InDerivatives;
+Texture2DArray<float4> InMoments;
+Texture2DArray<float> InCaustics;
+RWTexture2DArray<float> OutCaustics;
+RWTexture2DArray<float> CausticMip1;
+RWTexture2DArray<float> CausticMip2;
+RWTexture2DArray<float> CausticMip3;
+RWTexture2DArray<float> CausticMip4;
+RWTexture2DArray<float> CausticMip5;
+RWTexture2DArray<float> CausticMip6;
+RWTexture2DArray<float> CausticMip7;
+RWTexture2DArray<float> CausticMip8;
+SamplerState WaveSampler;
+
+#if WATER_TILE_SIZE != 8 || WATER_CAUSTIC_SIZE != 256
+#error Update the tiled caustics mip layout when changing the texture size
+#endif
+
+groupshared float2 RefractedRay[WATER_TILE_SIZE + 1][WATER_TILE_SIZE + 1];
+groupshared float Radiance[16][16];
+
+float ReduceRadiance(uint2 P, uint Stride)
+{
+    return 0.25 * (Radiance[P.y][P.x] + Radiance[P.y][P.x + Stride]
+        + Radiance[P.y + Stride][P.x] + Radiance[P.y + Stride][P.x + Stride]);
+}
+
+float2 RefractedLateral(uint2 Pixel)
+{
+    float2 UV = float2(Pixel) / WATER_CAUSTIC_SIZE;
+    float4 Medium = InDerivatives.SampleLevel(WaveSampler, float3(UV, 1), 0);
+    float4 Fine = InDerivatives.SampleLevel(WaveSampler, float3(UV * (McWaterPeriod[1] / McWaterPeriod[2]), 2), 0);
+    float2 Slope = McWaterDisplacedSlope(Medium) + McWaterDisplacedSlope(Fine);
+    [branch] if (Rain > 0.005)
+        Slope += InMoments.SampleLevel(WaveSampler, float3(UV, 1), 0).gb;
+    float3 Ray = McWaterRefractSun(SunDirection, Slope);
+    return Ray.xy / max(0.25, -Ray.z);
+}
+
+[numthreads(WATER_TILE_SIZE, WATER_TILE_SIZE, 1)]
+void CausticsCS(uint3 Id : SV_DispatchThreadID, uint3 Local : SV_GroupThreadID, uint Lane : SV_GroupIndex)
+{
+    RefractedRay[Local.y][Local.x] = RefractedLateral(Id.xy);
+    if (Lane < WATER_TILE_SIZE * 2 + 1)
+    {
+        // Share ray samples between neighbouring Jacobians, including the final row and column.
+        uint2 Edge = Lane < WATER_TILE_SIZE ? uint2(WATER_TILE_SIZE, Lane)
+            : uint2(Lane - WATER_TILE_SIZE, WATER_TILE_SIZE);
+        RefractedRay[Edge.y][Edge.x] = RefractedLateral(Id.xy - Local.xy + Edge);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    float2 A = RefractedRay[Local.y][Local.x];
+    float2 B = RefractedRay[Local.y][Local.x + 1];
+    float2 C = RefractedRay[Local.y + 1][Local.x];
+    float2 D = RefractedRay[Local.y + 1][Local.x + 1];
+    const float ReferenceDepth = 0.85;
+    const float Scale = 0.5 * ReferenceDepth * (WATER_CAUSTIC_SIZE / McWaterPeriod[1]);
+    float2 Dx = float2(1.0, 0.0) + ((B - A) + (D - C)) * Scale;
+    float2 Dy = float2(0.0, 1.0) + ((C - A) + (D - B)) * Scale;
+    float Power = 1.0 / max(0.28, abs(Dx.x * Dy.y - Dx.y * Dy.x));
+    float Value = max(0.0, Power - 1.0);
+    OutCaustics[Id] = Value;
+    Radiance[Local.y][Local.x] = Value;
+    GroupMemoryBarrierWithGroupSync();
+    // Reduce each 8x8 tile directly into the first three mip levels.
+    if (all((Local.xy & 1) == 0))
+    {
+        Value = ReduceRadiance(Local.xy, 1);
+        Radiance[Local.y][Local.x] = Value;
+        CausticMip1[Id >> 1] = Value;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (all((Local.xy & 3) == 0))
+    {
+        Value = ReduceRadiance(Local.xy, 2);
+        Radiance[Local.y][Local.x] = Value;
+        CausticMip2[Id >> 2] = Value;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (Lane == 0)
+        CausticMip3[Id >> 3] = ReduceRadiance(Local.xy, 4);
+}
+
+[numthreads(16, 16, 1)]
+void CausticMipCS(uint3 Id : SV_GroupThreadID)
+{
+    int3 P = int3(Id.xy * 2, 0);
+    float Value = 0.25 * (InCaustics.Load(int4(P, 0)) + InCaustics.Load(int4(P + int3(1, 0, 0), 0))
+        + InCaustics.Load(int4(P + int3(0, 1, 0), 0)) + InCaustics.Load(int4(P + int3(1, 1, 0), 0)));
+    CausticMip4[Id] = Value;
+    Radiance[Id.y][Id.x] = Value;
+    GroupMemoryBarrierWithGroupSync();
+    if (all((Id.xy & 1) == 0))
+    {
+        Value = ReduceRadiance(Id.xy, 1);
+        Radiance[Id.y][Id.x] = Value;
+        CausticMip5[Id >> 1] = Value;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (all((Id.xy & 3) == 0))
+    {
+        Value = ReduceRadiance(Id.xy, 2);
+        Radiance[Id.y][Id.x] = Value;
+        CausticMip6[Id >> 2] = Value;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (all((Id.xy & 7) == 0))
+    {
+        Value = ReduceRadiance(Id.xy, 4);
+        Radiance[Id.y][Id.x] = Value;
+        CausticMip7[Id >> 3] = Value;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (all(Id.xy == 0))
+        CausticMip8[Id >> 4] = ReduceRadiance(Id.xy, 8);
+}

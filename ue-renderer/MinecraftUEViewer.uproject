@@ -1,0 +1,16 @@
+{
+  "FileVersion": 3,
+  "EngineAssociation": "5.8",
+  "Description": "Live viewer for the Minecraft Fabric terrain and camera bridge",
+  "Modules": [
+    { "Name": "MinecraftUEViewer", "Type": "Runtime", "LoadingPhase": "PostConfigInit" }
+  ],
+  "Plugins": [
+    { "Name": "ProceduralMeshComponent", "Enabled": true },
+    { "Name": "Niagara", "Enabled": true },
+    { "Name": "DLSS", "Enabled": true, "Optional": true, "PlatformAllowList": ["Win64"] },
+    { "Name": "FSR", "Enabled": true, "Optional": true, "PlatformAllowList": ["Win64"] },
+    { "Name": "XeSS", "Enabled": true, "Optional": true, "PlatformAllowList": ["Win64"] },
+    { "Name": "StreamlineDLSSG", "Enabled": true, "Optional": true, "PlatformAllowList": ["Win64"] }
+  ]
+}

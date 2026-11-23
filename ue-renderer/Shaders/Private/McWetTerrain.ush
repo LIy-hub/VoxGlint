@@ -1,0 +1,310 @@
+#ifndef MC_WET_TERRAIN
+#define MC_WET_TERRAIN
+
+#include "/MinecraftUEViewer/Private/McWaterOptics.ush"
+#include "/MinecraftUEViewer/Private/McWaterWavePatterns.ush"
+
+FDFVector3 McWetAbsolutePosition(float3 Translated)
+{
+    return DFSubtract(DFPromote(Translated), ResolvedView.PreViewTranslation);
+}
+
+float2 McWetRelativeXY(FDFVector3 World, float2 GridOrigin)
+{
+    const float2 OriginUE = float2(GridOrigin.y, -GridOrigin.x);
+    return DFSubtractDemote(MakeDFVector2(World.High.xy, World.Low.xy),
+        DFTwoProduct(OriginUE, float2(100.0, 100.0)));
+}
+
+float2 McWetPatternPosition(FDFVector3 World)
+{
+    return fmod(World.High.xy, 65536.0) + World.Low.xy;
+}
+
+float3 McPuddleContour(float2 WorldPattern)
+{
+    const float Scale = 6.28318530718 / 65536.0;
+    const float2 Phase = WorldPattern * Scale;
+    const float Aphase = Phase.x * 57.0 + sin(Phase.y * 46.0);
+    const float Bphase = Phase.y * 89.0 - cos(Phase.x * 79.0 + 1.1);
+    const float A = sin(Aphase) * 0.5 + 0.5;
+    const float B = cos(Bphase) * 0.5 + 0.5;
+    const float2 Gradient = (0.30 * cos(Aphase) * float2(57.0, 46.0 * cos(Phase.y * 46.0)) -
+        0.20 * sin(Bphase) * float2(79.0 * sin(Phase.x * 79.0 + 1.1), 89.0)) * Scale;
+    return float3(A * 0.6 + B * 0.4, Gradient);
+}
+
+float McPuddlePlacement(float2 WorldPattern, float DepthFromColumnTop)
+{
+    // Match the placement used when admitting existing P3 player foot impulses.
+    return max(0.92 * smoothstep(4.0, 12.0, DepthFromColumnTop),
+        0.57 * smoothstep(0.61, 0.81, McPuddleContour(WorldPattern).x));
+}
+
+float McWetTopCm(float EncodedTop)
+{
+    // The half-float grid stores integer block heights in cm. Round back to an exact block boundary.
+    return round(EncodedTop * 0.01) * 100.0;
+}
+
+float2 McWetNeighborMoisture(Texture2D History, Texture2D Precip, int2 Cell, int Size, float SurfaceZ)
+{
+    if (any(Cell < 0) || any(Cell >= Size))
+    {
+        return 0.0;
+    }
+    const float4 Column = Precip.Load(int3(Cell, 0));
+    const float Depth = McWetTopCm(Column.r) - SurfaceZ;
+    if (Column.b < 0.5 || Column.g < 0.25 || Column.g > 0.75 || Depth < -28.0 || Depth >= 99.0)
+    {
+        return 0.0;
+    }
+    return History.Load(int3(Cell, 0)).rg * (1.0 - smoothstep(87.0, 99.0, Depth));
+}
+
+float2 McWetEdgeFade(Texture2D History, Texture2D Precip, int2 Cell, int Size, float2 InCell,
+    float SurfaceZ, float2 Stored)
+{
+    const float2 Distance = min(InCell, 1.0 - InCell);
+    const int2 Direction = int2(InCell.x < 0.5 ? -1 : 1, InCell.y < 0.5 ? -1 : 1);
+    const float2 Moisture = max(Stored, 0.004);
+    const float2 Width = float2(0.075, 0.12);
+    float2 Fade = 1.0;
+    // Only pull back inside the current rain column. Never copy wetness into a sheltered or dry neighbor.
+    [branch] if (Distance.x < 0.12)
+    {
+        const float2 Adjacent = McWetNeighborMoisture(History, Precip, Cell + int2(Direction.x, 0), Size, SurfaceZ);
+        Fade = lerp(saturate(Adjacent / Moisture), 1.0, smoothstep(float2(0.0, 0.0), Width, Distance.xx));
+    }
+    [branch] if (Distance.y < 0.12)
+    {
+        const float2 Adjacent = McWetNeighborMoisture(History, Precip, Cell + int2(0, Direction.y), Size, SurfaceZ);
+        Fade = min(Fade, lerp(saturate(Adjacent / Moisture), 1.0, smoothstep(float2(0.0, 0.0), Width, Distance.yy)));
+    }
+    return Fade;
+}
+
+float McWetMicroCurvature(float2 UV, float2 AtlasSize, float3 BaseNormal)
+{
+#if PIXELSHADER && !RAYHITGROUPSHADER
+    // The slope of the existing tangent normal field supplies a curvature hint. No height channel or
+    // neighbor atlas taps are needed. Fade the hint before compressed/distant texels become unstable.
+    const float2 UVx = ddx(UV * AtlasSize);
+    const float2 UVy = ddy(UV * AtlasSize);
+    const float2 Nx = ddx(BaseNormal.xy);
+    const float2 Ny = ddy(BaseNormal.xy);
+    const float Projection = UVx.x * UVy.y - UVx.y * UVy.x;
+    const float Footprint = max(length(UVx), length(UVy));
+    if (abs(Projection) < 0.00001 || Footprint >= 1.75)
+    {
+        return 0.0;
+    }
+    const float Divergence = (Nx.x * UVy.y - Ny.x * UVx.y + Ny.y * UVx.x - Nx.y * UVy.x) / Projection;
+    return clamp(-0.26 * Divergence, -1.0, 1.0) * (1.0 - smoothstep(0.65, 1.75, Footprint));
+#else
+    return 0.0;
+#endif
+}
+
+float4 McWetTerrainState(float3 Position, float3 VertexNormal, float Curvature, Texture2D History, Texture2D Precip,
+    float3 GridOrigin, float HistoryValid, float PuddlesEnabled, float RainRate)
+{
+    [branch] if (HistoryValid < 0.5 || VertexNormal.z < -0.08)
+    {
+        return 0.0;
+    }
+    const FDFVector3 World = McWetAbsolutePosition(Position);
+    // Inset vertical faces into their own block at exact edges.
+    const float2 Relative = McWetRelativeXY(World, GridOrigin.xy) - VertexNormal.xy * 0.10;
+    const float2 RelativeMC = float2(-Relative.y, Relative.x) * 0.01;
+    if (any(RelativeMC < 0.0) || any(RelativeMC >= GridOrigin.z))
+    {
+        return 0.0;
+    }
+    const int3 Texel = int3(int2(floor(RelativeMC)), 0);
+    const float2 Stored = History.Load(Texel).rg;
+    [branch] if (max(Stored.x, Stored.y * PuddlesEnabled) < 0.004)
+    {
+        return 0.0;
+    }
+    const float4 Column = Precip.Load(Texel);
+    if (Column.b < 0.5 || Column.g < 0.25 || Column.g > 0.75)
+    {
+        return 0.0;
+    }
+
+    const float Top = McWetTopCm(Column.r);
+    const float Depth = (Top - World.High.z) - World.Low.z;
+    const float Up = smoothstep(0.25, 0.90, VertexNormal.z);
+    const float Exposed = 1.0 - smoothstep(lerp(16.0, 87.0, Up), lerp(28.0, 99.0, Up), Depth);
+    float2 Edge = 1.0;
+    [branch] if (Exposed > 0.0 && Up > 0.50)
+    {
+        Edge = McWetEdgeFade(History, Precip, Texel.xy, int(GridOrigin.z), frac(RelativeMC), Top - Depth, Stored);
+    }
+    float Wet = saturate(Stored.x) * Exposed * lerp(0.30, 1.0, Up) * Edge.x;
+    float Puddle = 0.0;
+    [branch] if (PuddlesEnabled > 0.5 && Stored.y > 0.004 && Exposed > 0.0 && Up > 0.0)
+    {
+        const float Placement = McPuddlePlacement(McWetPatternPosition(World), Depth);
+        Puddle = saturate(Stored.y) * Placement * Exposed * Up * Edge.y;
+    }
+    // Grooves retain a little more water while crowns retain more relief. Deep water covers both.
+    const float Micro = Curvature * (1.0 - smoothstep(0.52, 0.86, Puddle));
+    Wet = saturate(Wet * (1.0 + 0.075 * Micro));
+    Puddle = saturate(Puddle * (1.0 + 0.16 * Micro));
+    // Optical depth in millimeters. The represented water follows the original mesh surface.
+    const float DepthMm = 0.32 * Wet + 5.8 * pow(saturate(Puddle), 1.10);
+    return float4(Wet, Micro, saturate(RainRate) * Exposed, DepthMm);
+}
+
+float2 McWetRainSlope(float2 WorldPattern, float Clock)
+{
+    const float2 Position = WorldPattern / 64.0;
+    const float2 Cell = float2(int2(floor(Position)) & 1023);
+    const float2 Seed = frac(sin(float2(dot(Cell, float2(127.1, 311.7)),
+        dot(Cell, float2(269.5, 183.3)))) * 43758.5453);
+    const float Age = frac(Clock * (1.55 + 0.42 * Seed.y) + Seed.x);
+    const float2 Offset = frac(Position) - lerp(0.30, 0.70, Seed);
+    const float Radius = length(Offset);
+    const float Edge = Radius - (0.025 + Age * 0.23);
+    const float Wave = exp2(-640.0 * Edge * Edge) * sin(Edge * 70.0) * (1.0 - Age)
+        * (1.0 - smoothstep(0.21, 0.29, Radius));
+    return Offset * (0.10 * Wave / max(Radius, 0.001));
+}
+
+float2 McPuddleWindSlope(FDFVector3 World, float Clock, float3 Wind, float DepthMm)
+{
+    // Use the two parent P1 phase waves without its extra flow curl or any bound ripple state.
+    const float2 Periodic = (fmod(World.High.xy, 1600.0) + World.Low.xy) / 1600.0;
+    const float2 Drift = frac(Wind.xy * (Clock * lerp(0.010, 0.025, saturate(Wind.z))));
+    const float Weight = smoothstep(0.90, 3.1, DepthMm) * saturate(Wind.z);
+    return McWaterFlowPattern(frac(Periodic - Drift), false) * (0.020 * Weight);
+}
+
+float2 McPuddleFootSlope(float2 Relative, float Z, float Clock, Texture2D Footsteps, uint Count)
+{
+    float2 Slope = 0.0;
+    [loop] for (uint Index = 0; Index < Count; ++Index)
+    {
+        const float4 Stamp = Footsteps.Load(int3(Index, 0, 0));
+        const float Age = Clock - Stamp.w;
+        // Match the sampled surface to the local foot, with tolerance for small stone steps.
+        if (Stamp.w < 0.0 || Age < 0.0 || Age >= 1.1 || abs(Stamp.z - Z) > 14.0)
+        {
+            continue;
+        }
+        const float2 Offset = Relative - Stamp.xy;
+        const float DistanceSquared = dot(Offset, Offset);
+        if (DistanceSquared > 120.0 * 120.0)
+        {
+            continue;
+        }
+        const float Distance = sqrt(DistanceSquared);
+        const float Front = 6.0 + Age * 91.0;
+        const float Edge = (Distance - Front) / 11.0;
+        const float Back = (Distance - Front * 0.59) / 8.0;
+        const float Envelope = saturate(Age * 20.0) * saturate(1.0 - Age / 1.1);
+        const float Ring = McWaterPressurePulse(Edge).y + 0.45 * McWaterPressurePulse(Back).y;
+        Slope += Offset * (0.058 * Ring * Envelope / max(Distance, 0.1));
+    }
+    return clamp(Slope, -0.24, 0.24);
+}
+
+float3 McWetCoatNormal(float3 Position, half3x3 Tangent, float3 Bottom, float4 Wet, float Coat,
+    float Clock, Texture2D Footsteps, float ActiveFootsteps, float2 GridOrigin, float3 Wind)
+{
+    float WindFade = 1.0;
+#if PIXELSHADER && !RAYHITGROUPSHADER
+    [branch] if (Wind.z > 0.01)
+    {
+        const float FootprintCm = max(length(ddx(Position.xy)), length(ddy(Position.xy)));
+        WindFade = 1.0 - smoothstep(2.5, 18.0, FootprintCm);
+    }
+#endif
+    [branch] if (Coat < 0.004)
+    {
+        return Bottom;
+    }
+    const float Pool = smoothstep(0.64, 4.60, Wet.w);
+    float2 Ripple = 0.0;
+    [branch] if (Wet.w > 0.75 && (Wet.z > 0.01 || ActiveFootsteps > 0.5 || Wind.z > 0.01))
+    {
+        const FDFVector3 World = McWetAbsolutePosition(Position);
+        if (Wet.z > 0.01)
+        {
+            Ripple += McWetRainSlope(McWetPatternPosition(World), Clock) * Wet.z * Pool;
+        }
+        if (ActiveFootsteps > 0.5 && Wet.w > 1.55)
+        {
+            Ripple += McPuddleFootSlope(McWetRelativeXY(World, GridOrigin), World.High.z + World.Low.z,
+                Clock, Footsteps, min(8u, (uint)ActiveFootsteps))
+                * smoothstep(1.55, 4.65, Wet.w);
+        }
+        if (Wind.z > 0.01 && Wet.w > 0.90 && WindFade > 0.0)
+        {
+            Ripple += McPuddleWindSlope(World, Clock, Wind, Wet.w) * WindFade;
+        }
+    }
+    const float3 TangentRipple = TransformWorldVectorToTangent(Tangent, float3(Ripple, 0.0));
+    const float3 Layer = normalize(float3(Bottom.xy * lerp(0.56 - 0.12 * Wet.y, 0.052, Pool) + TangentRipple.xy, 1.0));
+    return normalize(lerp(Bottom, Layer, smoothstep(0.005, 0.19, Coat)));
+}
+
+float4 McPuddleBedRefraction(float2 UV, float3 Position, float3 View, float DepthMm, float Enabled, float FullFace)
+{
+#if PIXELSHADER && !RAYHITGROUPSHADER
+    [branch] if (Enabled < 0.5)
+    {
+        return 0.0;
+    }
+    const float2 X = ddx(Position.xy);
+    const float2 Y = ddy(Position.xy);
+    const float2 UVx = ddx(UV);
+    const float2 UVy = ddy(UV);
+    const float Projection = X.x * Y.y - X.y * Y.x;
+    if (FullFace < 0.5 || DepthMm < 0.95 || View.z <= 0.0 || abs(Projection) < 0.0001)
+    {
+        return 0.0;
+    }
+    const FDFVector3 World = McWetAbsolutePosition(Position);
+    const float2 CellCm = frac((fmod(World.High.xy, 100.0) + World.Low.xy) * 0.01) * 100.0;
+    const float2 EdgeCm = min(CellCm, 100.0 - CellCm);
+    // The donor must stay on its original Minecraft face, with extra room for the atlas bilinear taps.
+    const float FaceFade = smoothstep(1.5, 9.0, min(EdgeCm.x, EdgeCm.y));
+    const float DepthFade = smoothstep(0.95, 2.85, DepthMm);
+    const float LodFade = 1.0 - smoothstep(3.0, 15.0, max(length(X), length(Y)));
+    const float3 Contour = McPuddleContour(McWetPatternPosition(World));
+    const float T = saturate((Contour.x - 0.64) / 0.19);
+    const float Shape = T * T * (3.0 - 2.0 * T);
+    const float Scale = 4.5 * FaceFade * DepthFade * LodFade;
+    const float BedDepth = Scale * Shape;
+    const float3 Refracted = refract(-View, float3(0.0, 0.0, 1.0), rcp(McWaterIor));
+    const float2 Offset = BedDepth * Refracted.xy / max(-Refracted.z, 0.60);
+    const float2 ScreenOffset = float2(Offset.x * Y.y - Offset.y * Y.x, X.x * Offset.y - X.y * Offset.x) / Projection;
+    const float2 ShiftUV = ScreenOffset.x * UVx + ScreenOffset.y * UVy;
+    const float2 BedSlope = clamp(Contour.yz * (Scale * (6.0 / 0.19) * T * (1.0 - T)), -0.10, 0.10);
+    return float4(ShiftUV, BedSlope);
+#else
+    return 0.0;
+#endif
+}
+
+float3 McPuddleBedNormal(Texture2D Atlas, float2 UV, float4 Refraction, float3 Original, half3x3 Tangent)
+{
+#if PIXELSHADER && !RAYHITGROUPSHADER
+    const float2 UVx = ddx(UV);
+    const float2 UVy = ddy(UV);
+    [branch] if (any(abs(Refraction) > 0.000001))
+    {
+        const float3 Encoded = Atlas.SampleGrad(GlobalTrilinearClampedSampler,
+            UV + Refraction.xy, UVx, UVy).rgb;
+        const float3 Refracted = normalize(float3((Encoded.rg * 255.0 - 128.0) / 127.0,
+            max(0.004, Encoded.b * 2.0 - 1.0)));
+        return normalize(Refracted + TransformWorldVectorToTangent(Tangent, float3(Refraction.zw, 0.0)));
+    }
+#endif
+    return Original;
+}
+
+#endif

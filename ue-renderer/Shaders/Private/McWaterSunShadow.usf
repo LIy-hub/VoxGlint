@@ -1,0 +1,36 @@
+#include "/Engine/Private/Common.ush"
+#include "/MinecraftUEViewer/Private/McWaterSun.ush"
+
+StructuredBuffer<float3> CasterPositions;
+float3 ShadowAxis;
+float3 ShadowCenterM;
+float ShadowRadiusM;
+Texture2D WaterGrid;
+uint WaterOnly;
+
+struct FWaterShadowVertex
+{
+    float4 Clip : SV_POSITION;
+    float3 PositionM : TEXCOORD0;
+};
+
+FWaterShadowVertex MainVS(uint ID : SV_VertexID)
+{
+    static const uint Corners[] = {0, 1, 2, 0, 2, 3};
+    FWaterShadowVertex Out;
+    Out.PositionM = CasterPositions[(ID / 6u) * 4u + Corners[ID % 6u]];
+    Out.Clip = float4(McWaterShadowPosition(Out.PositionM, ShadowAxis, ShadowCenterM, ShadowRadiusM), 1.0);
+    return Out;
+}
+
+float MainPS(FWaterShadowVertex Vertex) : SV_Target0
+{
+    if (WaterOnly != 0u)
+    {
+        float Top;
+        float3 P = Vertex.PositionM + float3(0, 0, 0.035);
+        if (!McWaterSunLayer(McWaterSunColumn(WaterGrid, P.xy), P.z, Top))
+            discard;
+    }
+    return Vertex.Clip.z;
+}

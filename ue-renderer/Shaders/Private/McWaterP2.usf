@@ -1,0 +1,367 @@
+#include "/Engine/Private/Common.ush"
+#include "/MinecraftUEViewer/Private/McWaterSun.ush"
+
+struct FNearTriangle
+{
+    float4 A;
+    float4 B;
+    float4 C;
+};
+
+Texture2D<float> OpaqueDepth;
+Texture2D<float> MergedDepth;
+StructuredBuffer<FNearTriangle> NearTriangles;
+float3 EyeRelativeCm;
+float EyeSignedCm;
+float GridTopCm;
+float MaxPathM;
+uint TriangleCount;
+uint NearSource;
+
+float3 ClosestPointOnEdge(float3 P, float3 A, float3 B)
+{
+    float3 Edge = B - A;
+    return A + Edge * saturate(dot(P - A, Edge) / max(dot(Edge, Edge), 1e-6));
+}
+
+float TriangleSignedDistance(FNearTriangle Triangle, float3 P, out float DistanceSq)
+{
+    float3 A = Triangle.A.xyz;
+    float3 B = Triangle.B.xyz;
+    float3 C = Triangle.C.xyz;
+    float3 N = normalize(cross(C - A, B - A));
+    float Signed = dot(P - A, N);
+    float3 Projection = P - Signed * N;
+    bool Inside = dot(cross(Projection - A, B - A), N) >= 0 &&
+        dot(cross(Projection - B, C - B), N) >= 0 &&
+        dot(cross(Projection - C, A - C), N) >= 0;
+    DistanceSq = Signed * Signed;
+    [branch] if (!Inside)
+    {
+        float3 E0 = ClosestPointOnEdge(Projection, A, B) - Projection;
+        float3 E1 = ClosestPointOnEdge(Projection, B, C) - Projection;
+        float3 E2 = ClosestPointOnEdge(Projection, C, A) - Projection;
+        DistanceSq += min(dot(E0, E0), min(dot(E1, E1), dot(E2, E2)));
+    }
+    return Signed < 0.0 ? -sqrt(DistanceSq) : sqrt(DistanceSq);
+}
+
+float3 PointFromDepth(float4 SvPosition, float Depth)
+{
+    return SvPositionToTranslatedWorld(float4(SvPosition.xy, Depth, 1.0)) - View.TranslatedWorldCameraOrigin;
+}
+
+float RayDistance(float4 SvPosition, float Depth, float3 Ray, float LimitCm)
+{
+    return Depth > 0.0 ? clamp(dot(PointFromDepth(SvPosition, Depth), Ray), 0, LimitCm) : LimitCm;
+}
+
+float4 SegmentPS(noperspective float4 UVAndScreenPos : TEXCOORD0, in FStereoPSInput StereoInput,
+    float4 SvPosition : SV_POSITION) : SV_Target0
+{
+    if (UVAndScreenPos.x < 0.0)
+        return 0.0;
+    int2 Pixel = int2(SvPosition.xy);
+    float3 Near = PointFromDepth(SvPosition, 1.0);
+    float NearCm = length(Near);
+    float3 Ray = Near / max(NearCm, 1e-4);
+    float Signed = EyeSignedCm;
+    float Closest = 1e8;
+    [loop] for (uint I = 0; I < TriangleCount; ++I)
+    {
+        float D2;
+        float Candidate = TriangleSignedDistance(NearTriangles[I], EyeRelativeCm + Near, D2);
+        if (D2 < Closest)
+        {
+            Closest = D2;
+            Signed = Candidate;
+        }
+    }
+    float Width = max(fwidth(Signed), 0.001);
+    float Wet = saturate(0.5 - Signed / Width);
+    if (Wet <= 0.0)
+        return float4(0.0, 0.0, 0.0, float(NearSource));
+
+    float OpaqueZ = OpaqueDepth.Load(int3(Pixel, 0));
+    float WaterZ = MergedDepth.Load(int3(Pixel, 0));
+    float LimitCm = MaxPathM * 100.0;
+    float OpaqueCm = RayDistance(SvPosition, OpaqueZ, Ray, LimitCm);
+    float ExitCm = LimitCm;
+    uint ExitSource = 2;
+    // Both buffers are reversed-Z. Compare distances along the same normalized ray.
+    if (WaterZ > OpaqueZ)
+    {
+        float Candidate = RayDistance(SvPosition, WaterZ, Ray, LimitCm);
+        if (Candidate + 0.05 < OpaqueCm)
+        {
+            ExitCm = Candidate;
+            ExitSource = 1;
+        }
+    }
+    float3 NearWorld = EyeRelativeCm + Near;
+    [loop] for (uint J = 0; J < TriangleCount; ++J)
+    {
+        FNearTriangle T = NearTriangles[J];
+        float3 AB = T.B.xyz - T.A.xyz;
+        float3 AC = T.C.xyz - T.A.xyz;
+        float3 N = cross(AC, AB);
+        float Facing = dot(N, Ray);
+        if (Facing <= 1e-5)
+            continue;
+        float Candidate = dot(T.A.xyz - EyeRelativeCm, N) / Facing;
+        if (Candidate <= NearCm + 0.05 || Candidate >= ExitCm)
+            continue;
+        float3 AP = EyeRelativeCm + Ray * Candidate - T.A.xyz;
+        float3 CrossA = cross(AP, AB);
+        float3 CrossB = cross(AP - AB, AC - AB);
+        float3 CrossC = cross(AP - AC, -AC);
+        if (min(dot(CrossA, N), min(dot(CrossB, N), dot(CrossC, N))) >= -0.01)
+        {
+            ExitCm = Candidate;
+            ExitSource = 1;
+        }
+    }
+    // The coarse plane can bridge a missing pixel locally only if that column's
+    // highest layer was matched to the actual near interface on the CPU.
+    if (NearSource == 4 && ExitSource == 2 && Ray.z > 1e-3)
+    {
+        float Candidate = (GridTopCm - EyeRelativeCm.z) / Ray.z;
+        if (Candidate > NearCm && Candidate < min(ExitCm, NearCm + 50.0))
+        {
+            ExitCm = Candidate;
+            ExitSource = 1;
+        }
+    }
+    float EnterCm = EyeSignedCm > 0.0 ? NearCm * saturate(EyeSignedCm / max(EyeSignedCm - Signed, 1e-4)) : 0.0;
+    float EndCm = min(ExitCm, OpaqueCm);
+    ExitSource = EndCm < ExitCm ? 0 : ExitSource;
+    return float4(EnterCm * 0.01, max(EnterCm, EndCm) * 0.01, Wet, NearSource + 8u * ExitSource);
+}
+
+Texture2D<float4> SceneColor;
+Texture2D<float4> WaterSegment;
+Texture2D<float4> TransparentColor;
+Texture2D<float4> WaterVolume;
+Texture2D WaterGrid;
+Texture2D AirShadow;
+Texture2D WaterShadow;
+Texture2DArray CausticPattern;
+SamplerState CausticSampler;
+float2 PatternPhaseM;
+float3 EyeInGridM;
+float3 SunAir;
+float3 SunWater;
+float3 SunRadiance;
+float3 ShadowCenterM;
+float ShadowRadiusM;
+int2 VolumeMax;
+uint VolumeSteps;
+uint HasVolume;
+uint HasCausticPattern;
+uint HasSun;
+uint LocalLightCount;
+float4 LocalPositionRadius[4];
+float4 LocalRadiance[4];
+int2 PixelMin;
+int2 PixelMax;
+float3 WaterTint;
+float2 WaterOpticalScale;
+float3 AmbientRadiance;
+float Clock;
+float Film;
+float DistortionPx;
+uint DebugMode;
+uint HasTransparentColor;
+
+float WaterPhase(float CosTheta, float G)
+{
+    return (1.0 - G * G) * 0.07957747 / pow(max(0.01, 1.0 + G * G - 2.0 * G * CosTheta), 1.5);
+}
+
+float LocalSegmentVisibility(float3 RelativeM)
+{
+    float4 Clip = mul(float4(View.TranslatedWorldCameraOrigin + RelativeM * 100.0, 1),
+        View.TranslatedWorldToClip);
+    if (Clip.w <= 0.0)
+        return 0.0;
+    float2 UV = (Clip.xy / Clip.w) * View.ScreenPositionScaleBias.xy + View.ScreenPositionScaleBias.wz;
+    int2 Pixel = int2(UV * View.BufferSizeAndInvSize.xy);
+    if (any(Pixel < PixelMin) || any(Pixel > PixelMax))
+        return 0.0;
+    float Depth = OpaqueDepth.Load(int3(Pixel, 0));
+    return Depth <= 0.0 || ConvertFromDeviceZ(Depth) + 20.0 >= Clip.w ? 1.0 : 0.0;
+}
+
+float3 IntegrateLocalWaterLights(float3 P, float3 Ray, float3 Extinction)
+{
+    float3 Result = 0.0;
+    [loop] for (uint I = 0; I < LocalLightCount; ++I)
+    {
+        float3 ToLight = LocalPositionRadius[I].xyz - P;
+        float Distance = length(ToLight);
+        float Falloff = saturate(1.0 - Distance / max(0.01, LocalPositionRadius[I].w));
+        if (Falloff < 0.01)
+            continue;
+        float Visible = LocalSegmentVisibility(P + ToLight * 0.45) * LocalSegmentVisibility(P + ToLight * 0.80);
+        float Phase = WaterPhase(dot(Ray, ToLight / max(0.01, Distance)), 0.32);
+        Result += LocalRadiance[I].rgb * McWaterTransmittance(Extinction, Distance) *
+            (Phase * Visible * Falloff * Falloff / max(0.32, Distance * Distance));
+    }
+    return Result;
+}
+
+float4 VolumePS(noperspective float4 UVAndScreenPos : TEXCOORD0, in FStereoPSInput StereoInput,
+    float4 SvPosition : SV_POSITION) : SV_Target0
+{
+    if (UVAndScreenPos.x < 0.0)
+        return 0.0;
+    int2 ScreenPixel = min(PixelMin + int2(SvPosition.xy) * 2, PixelMax);
+    float4 Segment = WaterSegment.Load(int3(ScreenPixel, 0));
+    float Span = min(Segment.y - Segment.x, VolumeSteps < 8 ? 45.0 : 80.0);
+    if (Segment.z < 0.5 || Span < 0.025)
+        return 0;
+    float3 Ray = normalize(PointFromDepth(float4(float2(ScreenPixel) + 0.5, 1.0, 1.0), 1.0));
+    float3 Absorption, Scattering;
+    float G;
+    McWaterOpticalPreset(WaterTint, Absorption, Scattering, G);
+    McWaterApplyOpticalScale(WaterOpticalScale, Absorption, Scattering);
+    float3 Extinction = Absorption + Scattering;
+    G = VolumeSteps > 10 ? max(G, 0.76) : G;
+    float Phase = WaterPhase(dot(Ray, SunWater), G);
+    float RefractionCos;
+    float Transmission = 1.0 - McWaterFresnel(SunAir.z, rcp(McWaterIor), RefractionCos);
+    float3 Result = 0;
+    float3 Local = 0;
+    float PrevEnd = 0.0;
+    float3 PrevT = 1.0;
+    [loop] for (uint Index = 0; Index < VolumeSteps; ++Index)
+    {
+        // Resolve nearby shadows more finely and integrate the view extinction across each interval.
+        float U = float(Index + 1) / VolumeSteps;
+        float End = Span * U * U;
+        float Step = End - PrevEnd;
+        float Distance = 0.5 * (PrevEnd + End);
+        float3 T = McWaterTransmittance(Extinction, End);
+        float3 ViewWeight = PrevT - T;
+        PrevEnd = End;
+        PrevT = T;
+        float3 Relative = Ray * (Segment.x + Distance);
+        if (LocalLightCount > 0)
+            Local += IntegrateLocalWaterLights(Relative, Ray, Extinction) * ViewWeight;
+        if (HasSun == 0)
+            continue;
+        float3 P = EyeInGridM + Relative;
+        float3 Entry;
+        float SunPath;
+        if (!McWaterSunEntry(WaterGrid, P, SunWater, Entry, SunPath))
+            continue;
+        float Visibility = McWaterSunVisibility(AirShadow, Entry + SunAir * 0.12, SunAir,
+            ShadowCenterM, ShadowRadiusM, 0.10);
+        if (Visibility < 0.001)
+            continue;
+        Visibility *= McWaterSunVisibility(WaterShadow, P, SunWater, ShadowCenterM, ShadowRadiusM, 0.10);
+        if (HasCausticPattern != 0)
+        {
+            float Focus = McWaterRippleFocus(CausticPattern, CausticSampler, Entry + float3(PatternPhaseM, 0), SunPath, Step * 0.06);
+            Visibility *= lerp(0.80, 1.20, saturate(Focus * 2.2));
+        }
+        Visibility *= 1.0 - smoothstep(38.0, 48.0, SunPath);
+        Result += Visibility * McWaterTransmittance(Extinction, SunPath) * ViewWeight;
+    }
+    return float4((Result * SunRadiance * (Transmission * Phase) + Local) *
+        (Scattering / max(Extinction, 1e-5)) * View.PreExposure, 1);
+}
+
+float3 SampleVolume(int2 Pixel, float4 Segment)
+{
+    float2 At = (Pixel - PixelMin) * 0.5;
+    int2 Base = floor(At);
+    float2 Fraction = frac(At);
+    float3 Result = 0;
+    float Total = 0;
+    [unroll] for (int Y = 0; Y < 2; ++Y)
+    {
+        [unroll] for (int X = 0; X < 2; ++X)
+        {
+            int2 Tap = min(Base + int2(X, Y), VolumeMax);
+            int2 Source = min(PixelMin + Tap * 2, PixelMax);
+            float4 Other = WaterSegment.Load(int3(Source, 0));
+            float Weight = (X == 0 ? 1.0 - Fraction.x : Fraction.x) *
+                (Y == 0 ? 1.0 - Fraction.y : Fraction.y);
+            const float DepthTolerance = 0.10 + 0.022 * min(Other.y, Segment.y);
+            Weight *= step(0.5, Other.z) * exp2(-(abs(Other.x - Segment.x) + abs(Other.y - Segment.y)) / DepthTolerance);
+            Result += WaterVolume.Load(int3(Tap, 0)).rgb * Weight;
+            Total += Weight;
+        }
+    }
+    return Result / max(Total, 0.01);
+}
+
+float4 CompositePS(noperspective float4 UVAndScreenPos : TEXCOORD0, in FStereoPSInput StereoInput,
+    float4 SvPosition : SV_POSITION) : SV_Target0
+{
+    if (UVAndScreenPos.x < 0.0)
+        return 0.0;
+    int2 Pixel = int2(SvPosition.xy);
+    float4 Segment = WaterSegment.Load(int3(Pixel, 0));
+    float3 Absorption, Scattering;
+    float G;
+    McWaterOpticalPreset(WaterTint, Absorption, Scattering, G);
+    McWaterApplyOpticalScale(WaterOpticalScale, Absorption, Scattering);
+    float3 Extinction = Absorption + Scattering;
+    float Path = Segment.y - Segment.x;
+    float3 T = McWaterTransmittance(Extinction, Path);
+    uint Source = (uint)round(Segment.w) & 7u;
+
+    if (DebugMode == 1)
+        return float4(Segment.z, (Source == 2 || Source == 4) ? 1.0 : 0.0, Source == 3 ? 1.0 : 0.0, 1);
+    if (DebugMode == 2)
+        return float4(saturate(Segment.x / 0.10), saturate(Segment.y / 16.0), saturate(Path / 16.0), 1);
+    if (DebugMode == 3)
+    {
+        float Z0 = OpaqueDepth.Load(int3(Pixel, 0));
+        float Z1 = MergedDepth.Load(int3(Pixel, 0));
+        float A = HasTransparentColor ? TransparentColor.Load(int3(Pixel, 0)).a : 1.0;
+        return float4(Z0 > 0.0 ? exp(-ConvertFromDeviceZ(Z0) * 0.0008) : 0.0, Z1 > Z0, saturate(1 - A), 1);
+    }
+    if (DebugMode == 4)
+        return float4(lerp(1.0.xxx, T, Segment.z), 1);
+
+    if (DebugMode == 5)
+    {
+        float3 Ray = normalize(PointFromDepth(SvPosition, 1.0));
+        float CosOut;
+        float Fresnel = McWaterFresnel(saturate(Ray.z), McWaterIor, CosOut);
+        float Exit = (uint)round(Segment.w) / 8u == 1u && Ray.z > 0.0 ? Segment.z : 0.0;
+        return float4(Exit * Fresnel, Exit * (1.0 - Fresnel), 0, 1);
+    }
+
+    if (DebugMode == 6)
+        return float4(HasVolume ? SampleVolume(Pixel, Segment) : 0.0.xxx, 1);
+
+    int2 SamplePixel = Pixel;
+    float2 XY = (SvPosition.xy - PixelMin) / max(1.0.xx, float2(PixelMax - PixelMin));
+    [branch] if (DistortionPx > 0.0 && Segment.z > 0.0)
+    {
+        float2 Warp = sin(float2(XY.y * 36.0 + Clock * 1.7, XY.x * 31.0 - Clock * 1.3));
+        int2 Probe = clamp(Pixel + int2(round(Warp * DistortionPx * Segment.z)), PixelMin, PixelMax);
+        float4 Other = WaterSegment.Load(int3(Probe, 0));
+        if (Other.z > 0.95 && abs(Other.y - Segment.y) < max(0.12, Segment.y * 0.025))
+            SamplePixel = Probe;
+    }
+    [branch] if (Film > 0.0 && Segment.z < 0.01)
+    {
+        float Slide = 1.0 - Film;
+        float Ribbon = smoothstep(0.23, 0.5, abs(XY.x - 0.5)) *
+            (0.5 + 0.5 * sin(XY.y * 22.0 - Slide * 9.0 + sin(XY.x * 37.0)));
+        int2 Probe = clamp(Pixel + int2(round(float2(sin(XY.y * 30.0) * 0.7, 6.0) * Ribbon * Film)), PixelMin, PixelMax);
+        if (WaterSegment.Load(int3(Probe, 0)).z < 0.01)
+            SamplePixel = Probe;
+    }
+    float4 Color = SceneColor.Load(int3(SamplePixel, 0));
+    float3 InScatter = AmbientRadiance * View.PreExposure * Scattering / max(Extinction, 1e-5) * (1.0 - T);
+    if (HasVolume && Segment.z > 0)
+        InScatter += SampleVolume(Pixel, Segment);
+    Color.rgb = lerp(Color.rgb, Color.rgb * T + InScatter, Segment.z);
+    return Color;
+}
