@@ -8,6 +8,7 @@
   "Plugins": [
     { "Name": "ProceduralMeshComponent", "Enabled": true },
     { "Name": "Niagara", "Enabled": true },
+    { "Name": "AndroidFileServer", "Enabled": false },
     { "Name": "DLSS", "Enabled": true, "Optional": true, "PlatformAllowList": ["Win64"] },
     { "Name": "FSR", "Enabled": true, "Optional": true, "PlatformAllowList": ["Win64"] },
     { "Name": "XeSS", "Enabled": true, "Optional": true, "PlatformAllowList": ["Win64"] },
