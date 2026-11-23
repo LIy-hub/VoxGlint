@@ -191,21 +191,27 @@ UE 在相机 80 格内复用灯组件。MegaLights 基线预算为 1024，软件
 
 ## 安装并启动 Windows 版
 
-准备 Minecraft Java 26.2、Fabric Loader 0.19.5、Java 25，以及能运行 DirectX 12 / Shader Model 6 的 Windows x64 环境。将发布页或本地构建的 `voxglint-0.28.2.jar` 放到该实例的 `mods` 文件夹，把从源代码打包出的 `minecraftue-renderer` 目录放在实例的**游戏目录**下（与 `options.txt` 同级）。HMCL 启用了版本隔离时，使用对应版本自己的游戏目录。升级时移出 `mods` 中的旧版 JAR（文件名可能以 `minecraft-ue-bridge-` 或 `voxglint-` 开头），并一起替换渲染器目录。
+准备 Minecraft Java 26.2、Fabric Loader 0.19.5、Java 25，以及能运行 DirectX 12 / Shader Model 6 的 Windows x64 环境。下载相同版本的 Fabric JAR 和 Windows 渲染器 ZIP。渲染器包自带 UE 运行时，直接安装到 Minecraft 实例即可。[v0.28.2 发布页](https://github.com/LIy-hub/VoxGlint/releases/tag/v0.28.2) · [Windows 运行时条款](windows-runtime-terms.md)
+
+打开启动器设置的实例**游戏目录**。已经启动过的实例，可用 `options.txt` 所在目录定位。HMCL 等启动器启用版本隔离时，指对应版本自己的游戏目录。将 JAR 放到该目录的 `mods` 下，将 Windows ZIP 直接解压到游戏目录。ZIP 最外层已经有 `minecraftue-renderer`，解压后应与 `mods` 同级。开发者也可以将本地构建目录以同样的结构放入实例。
 
 ```text
 游戏目录/
+├── options.txt
 ├── mods/voxglint-0.28.2.jar
 └── minecraftue-renderer/
+    ├── WINDOWS-RUNTIME-TERMS.md
     ├── Engine/
     └── MinecraftUEViewer/
         ├── Binaries/Win64/MinecraftUEViewer-Win64-Shipping.exe
         └── Content/Paks/
 ```
 
+准备好 Microsoft Visual C++ v14 x64 Redistributable。微软要求运行库架构与应用一致，版本至少与编译应用所用的 MSVC 工具链一样新。新系统可直接安装最新的 x64 版本。[官方下载](https://aka.ms/vc14/vc_redist.x64.exe) · [Microsoft 运行库说明](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170#latest-supported-redistributable-version)
+
 像平时一样从 Minecraft 启动器启动该实例。Mod 会拉起 Win64 Shipping 渲染器，等 UE 准备好并显示 Minecraft 界面后，自动隐藏原生窗口。新实例首次启动时，先在原生窗口完成 Minecraft 的辅助功能引导。启动前缺少渲染器，或进程在交接前启动失败时，可继续用原生窗口。交接后断线若超过 20 秒，MC 会保存并退出。退出 Minecraft 时，Mod 启动的渲染进程也会退出。启动和连接信息写入游戏目录的 `logs/latest.log`。
 
-若 Windows 提示缺少 VC++ 运行库，可运行渲染器目录内的 `Engine/Extras/Redist/en-us/vc_redist.x64.exe`。
+升级时先退出游戏，移出 `mods` 中的旧 JAR（文件名可能以 `minecraft-ue-bridge-` 或 `voxglint-` 开头），再把旧的 `minecraftue-renderer` 目录移出实例，按上面的目录结构安装新版本。若游戏启动后仍留在原生窗口，可从 `logs/latest.log` 查看 `Minecraft UE Bridge` 的查找路径与启动记录。
 
 可用 JVM 参数 `-Dminecraftue.renderer.directory="渲染器目录的绝对路径"` 指定渲染器目录，或用 `-Dminecraftue.renderer.autostart=false` 停用自动启动。`--enable-native-access=ALL-UNNAMED` 可消除 Java 25 的本地访问警告。
 

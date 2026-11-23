@@ -17,9 +17,11 @@ VoxGlint uses Unreal® Engine. Unreal® is a trademark or registered trademark o
 
 Unreal® Engine, Copyright 1998 – 2026, Epic Games, Inc. All rights reserved.
 
-源项目以单独安装的 UE 5.8.4 为依赖。`Prepare-RendererAssets.ps1` 从本机引擎的体积云预设和 Niagara 模板生成本地 .uasset，相关 Epic 内容依其原许可使用。Win64 Shipping 包中的 UE 运行时、烘焙的 Epic 内容和随引擎分发的第三方运行库适用各自条款，随包原有版权及许可声明保持效力。[Unreal Engine EULA](https://www.unrealengine.com/eula/unreal)
+源项目以单独安装的 UE 5.8.4 为依赖。`Prepare-RendererAssets.ps1` 从本机引擎的体积云预设和 Niagara 模板生成本地 .uasset，相关 Epic 内容依其原许可使用。公开 Win64 渲染器 ZIP 中的 UE 运行时、烘焙的 Epic 内容及第三方运行库适用各自条款。随包的 `WINDOWS-RUNTIME-TERMS.md` 说明使用条件，相关版权及许可声明保持效力。[Unreal Engine EULA](https://www.unrealengine.com/eula/unreal)
 
 发行包中的 Unreal Engine 授权技术仅限作为 VoxGlint 二进制发行版的一部分使用。法律允许的最大范围内，任何与该授权技术相关的明示、默示或法定陈述、保证及条件均予以排除，VoxGlint 贡献者及 Epic 不承担与该授权技术相关的责任。
+
+Win64 渲染器使用 Microsoft Visual C++ v14 x64 运行库。运行库安装程序由 Microsoft 提供，适用 Microsoft 的下载条款。[Microsoft 运行库说明](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170#latest-supported-redistributable-version)
 
 ## 可选显卡组件
 

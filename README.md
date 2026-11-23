@@ -16,8 +16,8 @@ VoxGlint is a real-time Unreal Engine renderer for Minecraft Java Edition. [Cont
 
 **v0.28.2 · Windows x64 · Minecraft Java 26.2 · 桥接协议 v28**
 
-- 游戏使用 Fabric Loader 0.19.5 和 Java 25，UE 渲染器使用 DirectX 12 / Shader Model 6。此前的 Windows 实机验证覆盖单人游戏和窗口交接。本次公开源码已通过 Fabric 构建、合约测试和 UE 5.8.4 编辑器目标构建。
-- 首发提供项目源代码和 Fabric 模组 JAR。Windows 渲染器需要用 Unreal Engine 5.8 自行构建，安装时请将同版本的两端一起使用。[GitHub Releases](https://github.com/LIy-hub/VoxGlint/releases)
+- 渲染器对应 Windows x64，显卡与驱动需支持 DirectX 12 / Shader Model 6。Minecraft 实例使用 Fabric Loader 0.19.5 和 Java 25。
+- Fabric 模组 JAR 和 Windows 渲染器 ZIP 分开下载，安装时请使用同一版本。Windows 包自带渲染运行时，无需安装 Unreal Engine。[v0.28.2 发布页](https://github.com/LIy-hub/VoxGlint/releases/tag/v0.28.2) · [Windows 运行时条款](docs/windows-runtime-terms.md)
 
 ## 画面与控制
 
@@ -25,17 +25,14 @@ VoxGlint is a real-time Unreal Engine renderer for Minecraft Java Edition. [Cont
 - 资源包可以提供 LabPBR 材质。VoxGlint 同步动态纹理和模型，并用纹理决定哪些区域发光。染色玻璃透光可在设置中开启，目前默认关闭。
 - 画质与色彩在 Minecraft 的「视频设置 → VoxGlint 渲染设置…」中调整。设备支持时可使用硬件光追和路径追踪摄影。
 
-## 构建与安装
+## 安装 Windows 版
 
-准备 JDK 25、Unreal Engine 5.8（实测 5.8.4）、MSVC C++ 工具链和 Windows SDK。首次构建 Fabric 模组时，Gradle Wrapper 会联网下载依赖。在项目根目录用 PowerShell 执行，按提示填写 UE 安装目录。
+1. 打开启动器中 Minecraft Java 26.2 的 Fabric 实例，找到它的游戏目录。已有 `options.txt` 的实例，以该文件所在目录为准。开启版本隔离时，使用该版本单独的游戏目录。
+2. 把 `voxglint-0.28.2.jar` 放到这个目录的 `mods` 下。将 Windows ZIP 解压到同一个游戏目录，解压完成后 `minecraftue-renderer` 与 `mods` 同级。[Fabric 模组 JAR](https://github.com/LIy-hub/VoxGlint/releases/download/v0.28.2/voxglint-0.28.2.jar) · [Windows x64 渲染器 ZIP](https://github.com/LIy-hub/VoxGlint/releases/download/v0.28.2/VoxGlint-Renderer-v0.28.2-Windows-x64.zip)
+3. 如果电脑缺少 Microsoft Visual C++ v14 x64 运行库，安装 Microsoft 提供的 x64 Redistributable。[官方下载](https://aka.ms/vc14/vc_redist.x64.exe)
+4. 从启动器正常启动该 Fabric 实例，模组会自动启动渲染器。[详细目录结构与启动排查](docs/renderer-guide.md#安装并启动-windows-版)
 
-```powershell
-$ue = Read-Host 'Unreal Engine 5.8 安装目录'
-.\Package-Renderer.ps1 -EngineRoot $ue
-.\fabric-bridge\gradlew.bat -p .\fabric-bridge build
-```
-
-将 `fabric-bridge/build/libs/voxglint-0.28.2.jar` 放进对应 Minecraft 实例的 `mods`，把 `dist/minecraftue-renderer` 整个目录放到该实例的游戏目录（与 `options.txt` 同级）。随后从启动器启动该 Fabric 实例，模组会启动渲染器。[完整安装说明](docs/renderer-guide.md#安装并启动-windows-版) · [编辑器联调](docs/renderer-guide.md#编辑器联调)
+开发者可用 Unreal Engine 5.8.4、JDK 25、MSVC 和 Windows SDK 从源码构建。[构建和编辑器联调](docs/renderer-guide.md#构建与开发启动)
 
 ## 一起开发
 
